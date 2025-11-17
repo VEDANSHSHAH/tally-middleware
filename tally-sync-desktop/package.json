@@ -1,0 +1,52 @@
+{
+  "name": "tally-sync-desktop",
+  "version": "1.0.0",
+  "description": "Sync Tally data to cloud - Desktop App",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "nodemon --exec electron .",
+    "build": "electron-builder build --win --publish never",
+    "build-all": "electron-builder build --win --mac --linux --publish never"
+  },
+  "keywords": ["tally", "sync", "desktop"],
+  "author": "Ankit",
+  "license": "ISC",
+  "dependencies": {
+    "axios": "^1.7.9",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "electron": "^28.0.0",
+    "express": "^4.21.2",
+    "pg": "^8.13.1",
+    "xml2js": "^0.6.2"
+  },
+  "devDependencies": {
+    "electron-builder": "^24.9.1",
+    "nodemon": "^3.1.9"
+  },
+  "build": {
+    "appId": "com.tallysync.desktop",
+    "productName": "Tally Cloud Sync",
+    "win": {
+      "target": ["nsis"],
+      "icon": "build/icon.ico"
+    },
+    "mac": {
+      "target": ["dmg"],
+      "icon": "build/icon.png"
+    },
+    "linux": {
+      "target": ["AppImage"],
+      "icon": "build/icon.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Tally Cloud Sync",
+      "runAfterFinish": true
+    }
+  }
+}

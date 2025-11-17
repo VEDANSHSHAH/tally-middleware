@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Tally Cloud Sync</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>🔄 Tally Cloud Sync</h1>
+      <p class="subtitle">Syncing your Tally data to the cloud with AI Analytics</p>
+    </header>
+
+    <div class="status-card">
+      <div class="status-item">
+        <span class="icon">🟢</span>
+        <div>
+          <strong>Status</strong>
+          <p id="connection-status">Connecting...</p>
+        </div>
+      </div>
+      
+      <div class="status-item">
+        <span class="icon">⏰</span>
+        <div>
+          <strong>Last Sync</strong>
+          <p id="last-sync">Never</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="stats-grid">
+      <div class="stat-card">
+        <div class="stat-icon">👥</div>
+        <h3>Vendors</h3>
+        <p class="stat-value" id="vendor-count">-</p>
+        <p class="stat-label">Total Payables</p>
+        <p class="stat-amount" id="vendor-amount">₹ -</p>
+      </div>
+
+      <div class="stat-card">
+        <div class="stat-icon">📊</div>
+        <h3>Customers</h3>
+        <p class="stat-value" id="customer-count">-</p>
+        <p class="stat-label">Total Receivables</p>
+        <p class="stat-amount" id="customer-amount">₹ -</p>
+      </div>
+
+      <div class="stat-card">
+        <div class="stat-icon">💰</div>
+        <h3>Transactions</h3>
+        <p class="stat-value" id="transaction-count">-</p>
+        <p class="stat-label">Last 30 Days</p>
+        <p class="stat-amount" id="transaction-amount">₹ -</p>
+      </div>
+    </div>
+
+    <!-- ⭐ NEW: Analytics Section -->
+    <div class="analytics-section">
+      <h2>📈 Analytics & Insights</h2>
+      
+      <!-- Vendor Scores -->
+      <div class="analytics-card">
+        <h3>🏆 Vendor Performance</h3>
+        <div id="vendor-scores-container">
+          <p class="loading">Loading vendor scores...</p>
+        </div>
+      </div>
+
+      <!-- Outstanding Aging -->
+      <div class="analytics-card">
+        <h3>📅 Outstanding Aging</h3>
+        <div id="aging-container">
+          <p class="loading">Loading aging analysis...</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="actions">
+      <button id="sync-btn" class="btn-primary">
+        <span>🔄</span> Sync Now
+      </button>
+      <button id="refresh-btn" class="btn-secondary">
+        <span>♻️</span> Refresh
+      </button>
+    </div>
+
+    <div class="sync-log">
+      <h3>Recent Activity</h3>
+      <div id="log-entries">
+        <p class="log-entry">Waiting for first sync...</p>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

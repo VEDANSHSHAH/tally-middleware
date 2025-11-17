@@ -6,6 +6,13 @@ require('dotenv').config();
 
 const { pool, initDB } = require('./db/postgres');
 
+// ⭐ Import analytics functions
+const { 
+  calculateVendorSettlementCycles,
+  calculateOutstandingAging,
+  calculateVendorScores
+} = require('./analytics/paymentCycles');
+
 const app = express();
 app.use(cors());
 app.use(express.json());
@@ -564,6 +571,82 @@ app.get('/api/stats', async (req, res) => {
   }
 });
 
+// ==================== ANALYTICS ENDPOINTS ⭐ NEW ====================
+
+// Get payment cycles
+app.get('/api/analytics/payment-cycles', async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT 
+        pc.*,
+        v.name as vendor_name
+      FROM payment_cycles pc
+      LEFT JOIN vendors v ON v.id = pc.vendor_id
+      ORDER BY pc.calculated_at DESC
+    `);
+    
+    res.json({ success: true, count: result.rows.length, data: result.rows });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Get outstanding aging
+app.get('/api/analytics/aging', async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT 
+        oa.*,
+        COALESCE(v.name, c.name) as entity_name
+      FROM outstanding_aging oa
+      LEFT JOIN vendors v ON v.id = oa.vendor_id
+      LEFT JOIN customers c ON c.id = oa.customer_id
+      ORDER BY oa.total_outstanding DESC
+    `);
+    
+    res.json({ success: true, count: result.rows.length, data: result.rows });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Get vendor scores
+app.get('/api/analytics/vendor-scores', async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT 
+        vs.*,
+        v.name as vendor_name,
+        v.current_balance
+      FROM vendor_scores vs
+      JOIN vendors v ON v.id = vs.vendor_id
+      ORDER BY vs.overall_score DESC
+    `);
+    
+    res.json({ success: true, count: result.rows.length, data: result.rows });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Trigger analytics calculation
+app.post('/api/analytics/calculate', async (req, res) => {
+  try {
+    console.log('🔄 Running analytics calculations...');
+    
+    await calculateVendorSettlementCycles();
+    await calculateOutstandingAging();
+    await calculateVendorScores();
+    
+    res.json({ 
+      success: true, 
+      message: 'Analytics calculated successfully' 
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 // ==================== AUTO-SYNC SCHEDULER ====================
 
 const SYNC_INTERVAL = 5 * 60 * 1000; // 5 minutes in milliseconds
@@ -587,6 +670,11 @@ async function autoSync() {
     console.log('💰 Syncing transactions...');
     const transactionResponse = await axios.post(`http://localhost:${PORT}/api/sync/transactions`, {});
     console.log(`✅ Transactions: ${transactionResponse.data.count} synced`);
+    
+    // ⭐ NEW - Calculate analytics
+    console.log('📊 Calculating analytics...');
+    const analyticsResponse = await axios.post(`http://localhost:${PORT}/api/analytics/calculate`);
+    console.log(`✅ Analytics: ${analyticsResponse.data.message}`);
     
     console.log('🎉 ===== AUTO-SYNC COMPLETED =====\n');
   } catch (error) {
@@ -614,6 +702,10 @@ const server = app.listen(PORT, () => {
   console.log(`   GET  /api/transactions/:id`);
   console.log(`   POST /api/sync/transactions`);
   console.log(`   GET  /api/stats`);
+  console.log(`   GET  /api/analytics/vendor-scores ⭐`);
+  console.log(`   GET  /api/analytics/aging ⭐`);
+  console.log(`   GET  /api/analytics/payment-cycles ⭐`);
+  console.log(`   POST /api/analytics/calculate ⭐`);
   console.log(`\n⏰ Auto-sync: Every 5 minutes`);
   console.log(`🔄 First sync in 10 seconds...\n`);
   
