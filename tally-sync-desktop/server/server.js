@@ -594,17 +594,105 @@ app.get('/api/analytics/payment-cycles', async (req, res) => {
 // Get outstanding aging
 app.get('/api/analytics/aging', async (req, res) => {
   try {
+    // Always refresh the aging table before serving results
+    await calculateOutstandingAging();
+
     const result = await pool.query(`
       SELECT 
-        oa.*,
-        COALESCE(v.name, c.name) as entity_name
+        oa.entity_type,
+        oa.vendor_id,
+        oa.customer_id,
+        COALESCE(v.name, c.name) as entity_name,
+        SUM(oa.current_0_30_days) as current_0_30_days,
+        SUM(oa.current_31_60_days) as current_31_60_days,
+        SUM(oa.current_61_90_days) as current_61_90_days,
+        SUM(oa.current_over_90_days) as current_over_90_days,
+        SUM(oa.total_outstanding) as total_outstanding,
+        MAX(oa.calculated_at) as calculated_at,
+        MAX(oa.created_at) as created_at
       FROM outstanding_aging oa
       LEFT JOIN vendors v ON v.id = oa.vendor_id
       LEFT JOIN customers c ON c.id = oa.customer_id
-      ORDER BY oa.total_outstanding DESC
+      GROUP BY 
+        oa.entity_type,
+        oa.vendor_id,
+        oa.customer_id,
+        COALESCE(v.name, c.name)
+      ORDER BY total_outstanding DESC
     `);
+
+    let rows = result.rows || [];
+
+    // Normalize totals to numbers for sorting/formatting downstream
+    rows = rows.map(row => ({
+      ...row,
+      current_0_30_days: Number(row.current_0_30_days) || 0,
+      current_31_60_days: Number(row.current_31_60_days) || 0,
+      current_61_90_days: Number(row.current_61_90_days) || 0,
+      current_over_90_days: Number(row.current_over_90_days) || 0,
+      total_outstanding: Number(row.total_outstanding) || 0
+    }));
+
+    // Ensure every customer is represented even if analytics table missed them
+    const existingCustomerIds = new Set(
+      rows
+        .filter(row => row.entity_type === 'customer' && row.customer_id)
+        .map(row => row.customer_id)
+    );
+
+    let customerQuery = `
+      SELECT 
+        id,
+        name,
+        synced_at,
+        created_at,
+        COALESCE(current_balance, 0) as balance
+      FROM customers
+    `;
+
+    if (existingCustomerIds.size) {
+      const placeholders = Array.from(existingCustomerIds).map((_, idx) => `$${idx + 1}`).join(', ');
+      customerQuery += ` WHERE id NOT IN (${placeholders})`;
+    }
+
+    const missingCustomers = await pool.query(
+      customerQuery,
+      existingCustomerIds.size ? Array.from(existingCustomerIds) : []
+    );
+
+    if (missingCustomers.rows?.length) {
+      const bucketsFromCustomer = (customer) => {
+        const balance = Math.abs(Number(customer.balance) || 0);
+        const syncedAt = customer.synced_at ? new Date(customer.synced_at) : null;
+        const now = new Date();
+        const msDiff = syncedAt ? (now - syncedAt) : Number.MAX_SAFE_INTEGER;
+        const days = msDiff / 86400000;
+        return {
+          current_0_30_days: days <= 30 ? balance : 0,
+          current_31_60_days: days > 30 && days <= 60 ? balance : 0,
+          current_61_90_days: days > 60 && days <= 90 ? balance : 0,
+          current_over_90_days: days > 90 ? balance : 0,
+          total_outstanding: balance
+        };
+      };
+
+      missingCustomers.rows.forEach(customer => {
+        const buckets = bucketsFromCustomer(customer);
+        rows.push({
+          entity_type: 'customer',
+          vendor_id: null,
+          customer_id: customer.id,
+          entity_name: customer.name,
+          ...buckets,
+          calculated_at: customer.synced_at,
+          created_at: customer.created_at
+        });
+      });
+    }
+
+    rows.sort((a, b) => (b.total_outstanding || 0) - (a.total_outstanding || 0));
     
-    res.json({ success: true, count: result.rows.length, data: result.rows });
+    res.json({ success: true, count: rows.length, data: rows });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
   }

@@ -3,7 +3,7 @@ const { pool } = require('../db/postgres');
 // Calculate settlement cycles for vendors
 async function calculateVendorSettlementCycles() {
   try {
-    console.log('📊 Calculating vendor settlement cycles...');
+    console.log('Calculating vendor settlement cycles...');
     
     const query = `
       WITH vendor_payments AS (
@@ -46,10 +46,10 @@ async function calculateVendorSettlementCycles() {
     `;
     
     const result = await pool.query(query);
-    console.log('✅ Vendor settlement cycles calculated');
+    console.log('Vendor settlement cycles calculated');
     return result;
   } catch (error) {
-    console.error('❌ Error calculating settlement cycles:', error);
+    console.error('Error calculating settlement cycles:', error);
     throw error;
   }
 }
@@ -57,7 +57,10 @@ async function calculateVendorSettlementCycles() {
 // Calculate outstanding aging
 async function calculateOutstandingAging() {
   try {
-    console.log('📊 Calculating outstanding aging...');
+    console.log('Calculating outstanding aging...');
+    
+    // Clear previous rows so each run rebuilds all entities
+    await pool.query('DELETE FROM outstanding_aging');
     
     // For vendors (payables)
     const vendorQuery = `
@@ -91,11 +94,44 @@ async function calculateOutstandingAging() {
       ON CONFLICT DO NOTHING
     `;
     
-    const result = await pool.query(vendorQuery);
-    console.log('✅ Outstanding aging calculated');
-    return result;
+    // For customers (receivables)
+    const customerQuery = `
+      INSERT INTO outstanding_aging (
+        customer_id,
+        entity_type,
+        current_0_30_days,
+        current_31_60_days,
+        current_61_90_days,
+        current_over_90_days,
+        total_outstanding,
+        calculated_at
+      )
+      SELECT 
+        c.id,
+        'customer',
+        CASE WHEN c.synced_at > NOW() - INTERVAL '30 days' 
+          THEN ABS(c.current_balance) ELSE 0 END,
+        CASE WHEN c.synced_at BETWEEN NOW() - INTERVAL '60 days' 
+          AND NOW() - INTERVAL '30 days' 
+          THEN ABS(c.current_balance) ELSE 0 END,
+        CASE WHEN c.synced_at BETWEEN NOW() - INTERVAL '90 days' 
+          AND NOW() - INTERVAL '60 days' 
+          THEN ABS(c.current_balance) ELSE 0 END,
+        CASE WHEN c.synced_at < NOW() - INTERVAL '90 days' 
+          THEN ABS(c.current_balance) ELSE 0 END,
+        ABS(c.current_balance),
+        NOW()
+      FROM customers c
+      WHERE c.current_balance IS NOT NULL
+      ON CONFLICT DO NOTHING
+    `;
+    
+    const vendorResult = await pool.query(vendorQuery);
+    const customerResult = await pool.query(customerQuery);
+    console.log('Outstanding aging calculated for vendors and customers');
+    return { vendorResult, customerResult };
   } catch (error) {
-    console.error('❌ Error calculating aging:', error);
+    console.error('Error calculating aging:', error);
     throw error;
   }
 }
@@ -103,7 +139,7 @@ async function calculateOutstandingAging() {
 // Calculate vendor scores
 async function calculateVendorScores() {
   try {
-    console.log('📊 Calculating vendor scores...');
+    console.log('Calculating vendor scores...');
     
     const query = `
       WITH vendor_metrics AS (
@@ -161,10 +197,10 @@ async function calculateVendorScores() {
     `;
     
     const result = await pool.query(query);
-    console.log('✅ Vendor scores calculated');
+    console.log('Vendor scores calculated');
     return result;
   } catch (error) {
-    console.error('❌ Error calculating scores:', error);
+    console.error('Error calculating scores:', error);
     throw error;
   }
 }
