@@ -1,11 +1,11 @@
-from openai import OpenAI
+import openai
 import os
 from dotenv import load_dotenv
 
 load_dotenv()
 
-# Initialize OpenAI client (new way)
-client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
+# Set API key (v0.28.1 style)
+openai.api_key = os.getenv('OPENAI_API_KEY')
 
 async def generate_vendor_insight(vendor_data):
     """Generate AI insight about a vendor"""
@@ -28,8 +28,8 @@ Provide:
 Keep it concise and actionable.
 """
 
-        # NEW API syntax
-        response = client.chat.completions.create(
+        # v0.28.1 API syntax
+        response = openai.ChatCompletion.create(
             model="gpt-3.5-turbo",
             messages=[
                 {"role": "system", "content": "You are a financial analyst providing insights to business owners."},
@@ -67,8 +67,8 @@ Provide a brief cash flow insight (2-3 sentences):
 Keep it concise and actionable.
 """
 
-        # NEW API syntax
-        response = client.chat.completions.create(
+        # v0.28.1 API syntax
+        response = openai.ChatCompletion.create(
             model="gpt-3.5-turbo",
             messages=[
                 {"role": "system", "content": "You are a financial analyst."},
@@ -97,8 +97,8 @@ Transactions: {len(context_data.get('transactions', []))}
 Answer the user's question based on this data.
 """
 
-        # NEW API syntax
-        response = client.chat.completions.create(
+        # v0.28.1 API syntax
+        response = openai.ChatCompletion.create(
             model="gpt-3.5-turbo",
             messages=[
                 {"role": "system", "content": context},
