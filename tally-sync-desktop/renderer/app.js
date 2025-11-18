@@ -1,5 +1,7 @@
 // API base URL
-const API_URL = 'http://localhost:3000/api';
+// Backend listens on 8000 per .env PORT, so point renderer there
+const API_URL = 'http://localhost:8000/api';
+const AI_API_URL = 'https://tally-middleware-production-7856.up.railway.app';
 
 // DOM elements
 const connectionStatus = document.getElementById('connection-status');
@@ -103,7 +105,7 @@ async function fetchStats() {
   }
 }
 
-// ⭐ NEW: Fetch and display vendor scores
+// Fetch and display vendor scores
 async function fetchVendorScores() {
   try {
     const response = await fetch(`${API_URL}/analytics/vendor-scores`);
@@ -142,7 +144,7 @@ async function fetchVendorScores() {
   }
 }
 
-// ⭐ NEW: Fetch and display aging analysis
+// Fetch and display aging analysis
 async function fetchAging() {
   try {
     const response = await fetch(`${API_URL}/analytics/aging`);
@@ -193,6 +195,66 @@ async function fetchAging() {
   }
 }
 
+// ⭐ Fetch AI insights from Railway
+async function fetchAIInsights() {
+  try {
+    const response = await fetch(`${AI_API_URL}/ai/insights`);
+    const data = await response.json();
+    
+    if (data.success && data.insights && data.insights.length > 0) {
+      displayAIInsights(data.insights);
+      addLog('🤖 AI insights loaded');
+    }
+  } catch (error) {
+    console.error('Error fetching AI insights:', error);
+    addLog('❌ Failed to load AI insights');
+  }
+}
+
+// ⭐ Display AI insights in the UI
+function displayAIInsights(insights) {
+  // Find the analytics section
+  const agingContainer = document.getElementById('aging-container');
+  
+  // Create AI insights container if it doesn't exist
+  let aiContainer = document.getElementById('ai-insights-container');
+  if (!aiContainer) {
+    const analyticsSection = agingContainer.closest('.analytics-card');
+    
+    // Create new AI insights card
+    const aiCard = document.createElement('div');
+    aiCard.className = 'analytics-card';
+    aiCard.innerHTML = '<h3>🤖 AI-Powered Insights</h3><div id="ai-insights-container"></div>';
+    
+    analyticsSection.parentNode.insertBefore(aiCard, analyticsSection.nextSibling);
+    aiContainer = document.getElementById('ai-insights-container');
+  }
+  
+  // Clear existing content
+  aiContainer.innerHTML = '';
+  
+  // Display each insight
+  insights.forEach(insight => {
+    const insightDiv = document.createElement('div');
+    insightDiv.className = 'ai-insight-item';
+    
+    const riskColor = insight.risk_level === 'low' ? '#4CAF50' : 
+                      insight.risk_level === 'medium' ? '#FF9800' : '#F44336';
+    
+    insightDiv.innerHTML = `
+      <div class="ai-insight-header">
+        <strong>${insight.vendor_name || 'Business Insight'}</strong>
+        <span class="ai-risk-badge" style="background: ${riskColor}">
+          ${insight.risk_level ? insight.risk_level.toUpperCase() : 'ANALYSIS'}
+        </span>
+      </div>
+      <div class="ai-insight-text">${insight.insight.replace(/\n/g, '<br>')}</div>
+    `;
+    
+    aiContainer.appendChild(insightDiv);
+  });
+}
+
 // Manual sync
 async function syncNow() {
   syncBtn.disabled = true;
@@ -241,6 +303,7 @@ async function refresh() {
   await fetchStats();
   await fetchVendorScores();
   await fetchAging();
+  await fetchAIInsights(); // ⭐ ADDED
   
   refreshBtn.disabled = false;
   refreshBtn.innerHTML = '<span>♻️</span> Refresh';
@@ -262,12 +325,14 @@ async function init() {
     await fetchStats();
     await fetchVendorScores();
     await fetchAging();
+    await fetchAIInsights(); // ⭐ ADDED
     
     // Auto-refresh every 30 seconds
     setInterval(async () => {
       await fetchStats();
       await fetchVendorScores();
       await fetchAging();
+      await fetchAIInsights(); // ⭐ ADDED
     }, 30000);
   } else {
     addLog('⚠️ Retrying connection in 5 seconds...');
