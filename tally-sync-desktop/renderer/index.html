@@ -30,6 +30,14 @@
                 <p id="last-sync">Never</p>
               </div>
             </div>
+            <div class="status-item">
+              <span class="icon" aria-hidden="true">&#128188;</span>
+              <div>
+                <strong>Business</strong>
+                <p id="business-name">Detecting...</p>
+                <p class="status-subtext" id="business-id">ID: --</p>
+              </div>
+            </div>
         </div>
 
         <div class="stats-grid">
@@ -109,6 +117,18 @@
           </div>
         </section>
 
+        <section class="card transactions-card">
+          <div class="card-header">
+            <div>
+              <h2>Recent Transactions</h2>
+              <p>Latest vouchers with synced Tally items</p>
+            </div>
+          </div>
+          <div id="transactions-list" class="transactions-list">
+            <p class="loading">Waiting for transaction data...</p>
+          </div>
+        </section>
+
         <section class="card formula-card">
           <div class="card-header">
             <div>
@@ -144,6 +164,12 @@
               <button class="aging-tab" data-view="customers">Customers</button>
               <button class="aging-tab" data-view="all">All</button>
             </div>
+          </div>
+          <div class="aging-controls">
+            <div class="aging-search">
+              <input type="text" id="aging-name-filter" placeholder="Search name..." aria-label="Search by name">
+            </div>
+            <div class="aging-pagination" id="aging-pagination" aria-label="Aging pagination"></div>
           </div>
           <div id="aging-container">
             <p class="loading">Loading aging analysis...</p>

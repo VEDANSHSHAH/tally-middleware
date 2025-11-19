@@ -5,6 +5,8 @@ const AI_API_URL = 'https://tally-middleware-production-7856.up.railway.app';
 // Core DOM elements
 const connectionStatus = document.getElementById('connection-status');
 const lastSync = document.getElementById('last-sync');
+const businessNameEl = document.getElementById('business-name');
+const businessIdEl = document.getElementById('business-id');
 const vendorCount = document.getElementById('vendor-count');
 const vendorAmount = document.getElementById('vendor-amount');
 const customerCount = document.getElementById('customer-count');
@@ -12,7 +14,10 @@ const customerAmount = document.getElementById('customer-amount');
 const salesTotal = document.getElementById('sales-total');
 const salesPillValue = document.getElementById('sales-pill-value');
 const salesBreakdown = document.getElementById('sales-breakdown');
+const transactionsList = document.getElementById('transactions-list');
 const agingContainer = document.getElementById('aging-container');
+const agingNameFilter = document.getElementById('aging-name-filter');
+const agingPagination = document.getElementById('aging-pagination');
 const logEntries = document.getElementById('log-entries');
 const syncBtn = document.getElementById('sync-btn');
 const refreshBtn = document.getElementById('refresh-btn');
@@ -55,9 +60,12 @@ let transactionsCache = [];
 let customerActivityMap = new Map();
 let agingData = [];
 let agingFilter = 'vendors';
+let agingPage = 1;
 let aiInsightsLoaded = false;
 let collectionTarget = null;
 let collectionTimerInterval = null;
+const AGING_PAGE_SIZE = 4;
+const AGING_MAX_VISIBLE_PAGES = 4;
 
 // Logging helper
 function addLog(message) {
@@ -84,12 +92,17 @@ agingTabs.forEach(tab => {
     agingTabs.forEach(btn => btn.classList.remove('active'));
     tab.classList.add('active');
     agingFilter = tab.dataset.view;
+    agingPage = 1;
     renderAging();
   });
 });
 
 customerAmountFilter?.addEventListener('change', () => renderSalesBreakdown());
 customerActivityFilter?.addEventListener('change', () => renderSalesBreakdown());
+agingNameFilter?.addEventListener('input', () => {
+  agingPage = 1;
+  renderAging();
+});
 
 function openAskAIModal() {
   aiModal.classList.remove('hidden');
@@ -158,7 +171,13 @@ async function fetchStats() {
   const data = await response.json();
   if (!data.success) throw new Error('Stats request failed');
 
-  const { vendors, customers, transactions } = data.stats;
+  const { vendors, customers, transactions, business } = data.stats;
+  if (businessNameEl) {
+    businessNameEl.textContent = (business && business.name) || 'Unknown business';
+  }
+  if (businessIdEl) {
+    businessIdEl.textContent = business?.id ? `ID: ${business.id}` : 'ID unavailable';
+  }
   vendorCount.textContent = vendors.total_vendors || 0;
   vendorAmount.textContent = formatCurrency(vendors.total_payables || 0);
   customerCount.textContent = customers.total_customers || 0;
@@ -210,6 +229,7 @@ async function fetchTransactions() {
   });
   renderSalesBreakdown();
   updateFormula();
+  renderRecentTransactions();
 }
 
 async function fetchAging() {
@@ -218,8 +238,49 @@ async function fetchAging() {
   if (!data.success) throw new Error('Aging API failed');
 
   agingData = data.data || [];
+  agingPage = 1;
   renderAging();
   addLog('Aging analysis loaded');
+}
+
+function renderRecentTransactions() {
+  if (!transactionsList) return;
+
+  if (!transactionsCache.length) {
+    transactionsList.innerHTML = '<p class="no-data">No transactions synced yet</p>';
+    return;
+  }
+
+  const rows = transactionsCache.slice(0, 5).map(tx => {
+    const title = tx.party_name || 'Unnamed voucher';
+    const voucherMeta = [
+      tx.voucher_type || 'Voucher',
+      tx.voucher_number ? `#${tx.voucher_number}` : null
+    ].filter(Boolean).join(' • ');
+    const itemDetails = [];
+    if (tx.item_name) itemDetails.push(tx.item_name);
+    if (tx.item_code) itemDetails.push(`Code ${tx.item_code}`);
+    const itemMeta = itemDetails.length
+      ? `<p class="transaction-meta small">${itemDetails.join(' • ')}</p>`
+      : '';
+    const displayDate = tx.date ? new Date(tx.date).toLocaleDateString() : 'No date';
+
+    return `
+      <div class="transaction-row">
+        <div>
+          <strong>${title}</strong>
+          <p class="transaction-meta">${voucherMeta || 'Voucher'}</p>
+          ${itemMeta}
+        </div>
+        <div class="transaction-right">
+          <span class="transaction-amount">${formatCurrency(tx.amount)}</span>
+          <span class="transaction-date">${displayDate}</span>
+        </div>
+      </div>
+    `;
+  }).join('');
+
+  transactionsList.innerHTML = rows;
 }
 
 function renderSalesBreakdown() {
@@ -289,23 +350,36 @@ function renderSalesBreakdown() {
 function renderAging() {
   if (!agingData.length) {
     agingContainer.innerHTML = '<p class="no-data">No aging data available yet</p>';
+    updateAgingPagination(0);
     updateCollectionTarget(null);
     return;
   }
 
-  const filtered = agingData.filter(item => {
+  let filtered = agingData.filter(item => {
     if (agingFilter === 'vendors') return item.entity_type === 'vendor';
     if (agingFilter === 'customers') return item.entity_type === 'customer';
     return true;
   });
 
+  const searchTerm = agingNameFilter?.value.trim().toLowerCase() || '';
+  if (searchTerm) {
+    filtered = filtered.filter(item =>
+      (item.entity_name || '').toLowerCase().includes(searchTerm)
+    );
+  }
+
   if (!filtered.length) {
-    agingContainer.innerHTML = '<p class="no-data">No records for this filter</p>';
+    const message = searchTerm ? 'No names match this search' : 'No records for this filter';
+    agingContainer.innerHTML = `<p class="no-data">${message}</p>`;
+    updateAgingPagination(0);
     updateCollectionTarget(null);
     return;
   }
 
-  const entries = filtered.slice(0, 5).map(item => `
+  const totalPages = Math.ceil(filtered.length / AGING_PAGE_SIZE);
+  agingPage = Math.max(1, Math.min(agingPage, totalPages));
+  const start = (agingPage - 1) * AGING_PAGE_SIZE;
+  const entries = filtered.slice(start, start + AGING_PAGE_SIZE).map(item => `
     <div class="aging-item">
       <div class="aging-header">
         <p class="aging-entity-name">${item.entity_name || 'Unnamed'}</p>
@@ -333,7 +407,47 @@ function renderAging() {
   `).join('');
 
   agingContainer.innerHTML = entries;
-  updateCollectionTarget(agingData);
+  updateCollectionTarget(filtered);
+  updateAgingPagination(totalPages);
+}
+
+function updateAgingPagination(totalPages) {
+  if (!agingPagination) return;
+  if (totalPages <= 1) {
+    agingPagination.innerHTML = '';
+    agingPagination.style.display = 'none';
+    return;
+  }
+
+  agingPagination.style.display = 'flex';
+  const maxButtons = AGING_MAX_VISIBLE_PAGES;
+  const halfWindow = Math.floor(maxButtons / 2);
+  let startPage = Math.max(1, agingPage - halfWindow);
+  let endPage = startPage + maxButtons - 1;
+
+  if (endPage > totalPages) {
+    endPage = totalPages;
+    startPage = Math.max(1, endPage - maxButtons + 1);
+  }
+
+  const buttons = [];
+  for (let page = startPage; page <= endPage; page += 1) {
+    buttons.push(`
+      <button class="aging-page-btn ${page === agingPage ? 'active' : ''}" data-page="${page}">
+        ${page}
+      </button>
+    `);
+  }
+
+  agingPagination.innerHTML = buttons.join('');
+  agingPagination.querySelectorAll('button').forEach(button => {
+    button.addEventListener('click', () => {
+      const nextPage = Number(button.dataset.page);
+      if (nextPage === agingPage) return;
+      agingPage = nextPage;
+      renderAging();
+    });
+  });
 }
 
 function updateCollectionTarget(data) {

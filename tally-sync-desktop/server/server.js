@@ -19,6 +19,17 @@ app.use(express.json());
 
 const TALLY_URL = process.env.TALLY_URL || 'http://localhost:9000';
 const PORT = process.env.PORT || 3000;
+const DEFAULT_BUSINESS_ID = process.env.BUSINESS_ID || 'default-business';
+const DEFAULT_BUSINESS_NAME = process.env.BUSINESS_NAME || 'Primary Business';
+const BUSINESS_CACHE_MS = 5 * 60 * 1000;
+let cachedBusinessMeta = null;
+let cachedBusinessExpiry = 0;
+
+const extractValue = (value) => {
+  if (value === undefined || value === null) return null;
+  if (typeof value === 'object' && '_' in value) return value._;
+  return value;
+};
 
 // Initialize database on startup
 initDB().catch(err => {
@@ -42,6 +53,98 @@ async function queryTally(xmlRequest) {
   }
 }
 
+async function getBusinessMetadata(forceRefresh = false) {
+  const now = Date.now();
+  if (!forceRefresh && cachedBusinessMeta && cachedBusinessExpiry > now) {
+    return cachedBusinessMeta;
+  }
+
+  const xmlRequest = `
+    <ENVELOPE>
+      <HEADER>
+        <VERSION>1</VERSION>
+        <TALLYREQUEST>Export</TALLYREQUEST>
+        <TYPE>Collection</TYPE>
+        <ID>Company Collection</ID>
+      </HEADER>
+      <BODY>
+        <DESC>
+          <STATICVARIABLES>
+            <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+          </STATICVARIABLES>
+          <TDL>
+            <TDLMESSAGE>
+              <COLLECTION NAME="Company Collection">
+                <TYPE>Company</TYPE>
+                <FETCH>NAME, REMOTECMPID, GUID</FETCH>
+              </COLLECTION>
+            </TDLMESSAGE>
+          </TDL>
+        </DESC>
+      </BODY>
+    </ENVELOPE>
+  `;
+
+  try {
+    const result = await queryTally(xmlRequest);
+    const companies = result?.ENVELOPE?.BODY?.DATA?.COLLECTION?.COMPANY;
+    if (!companies) {
+      throw new Error('Company data not returned');
+    }
+    const companyArray = Array.isArray(companies) ? companies : [companies];
+    const company = companyArray[0];
+    const meta = {
+      id: extractValue(company?.REMOTECMPID) || extractValue(company?.GUID) || DEFAULT_BUSINESS_ID,
+      name: extractValue(company?.NAME) || DEFAULT_BUSINESS_NAME
+    };
+    cachedBusinessMeta = meta;
+    cachedBusinessExpiry = now + BUSINESS_CACHE_MS;
+    return meta;
+  } catch (error) {
+    console.warn('Unable to fetch business metadata from Tally:', error.message);
+    const fallback = {
+      id: process.env.BUSINESS_ID || DEFAULT_BUSINESS_ID,
+      name: process.env.BUSINESS_NAME || DEFAULT_BUSINESS_NAME
+    };
+    cachedBusinessMeta = fallback;
+    cachedBusinessExpiry = now + BUSINESS_CACHE_MS;
+    return fallback;
+  }
+}
+
+function summarizeInventoryEntries(voucher) {
+  const rawEntries =
+    voucher?.['ALLINVENTORYENTRIES.LIST'] ||
+    voucher?.ALLINVENTORYENTRIES?.LIST ||
+    voucher?.['INVENTORYENTRIESIN.LIST'] ||
+    voucher?.['INVENTORYENTRIESOUT.LIST'];
+  if (!rawEntries) {
+    return { itemName: null, itemCode: null };
+  }
+  const entries = Array.isArray(rawEntries) ? rawEntries : [rawEntries];
+  const names = [];
+  const codes = [];
+
+  entries.forEach(entry => {
+    if (!entry) return;
+    const name = extractValue(entry?.STOCKITEMNAME) 
+      || extractValue(entry?.['STOCKITEMNAME.LIST']?.NAME);
+    const code = extractValue(entry?.ITEMCODE) 
+      || extractValue(entry?.STOCKITEMCODE)
+      || extractValue(entry?.PARTNUMBER);
+    if (name) names.push(name);
+    if (code) codes.push(code);
+  });
+
+  const uniqueNames = [...new Set(names)].join(', ');
+  const uniqueCodes = [...new Set(codes)].join(', ');
+
+  return {
+    itemName: uniqueNames ? uniqueNames.substring(0, 255) : null,
+    itemCode: uniqueCodes ? uniqueCodes.substring(0, 255) : null
+  };
+}
+
 // Test endpoint
 app.get('/api/test', (req, res) => {
   res.json({ 
@@ -57,9 +160,18 @@ app.get('/api/test', (req, res) => {
 // Get all vendors from PostgreSQL
 app.get('/api/vendors', async (req, res) => {
   try {
-    const result = await pool.query(
-      'SELECT * FROM vendors ORDER BY name'
-    );
+    const { businessId } = req.query;
+    let query = 'SELECT * FROM vendors';
+    const params = [];
+
+    if (businessId) {
+      query += ' WHERE business_id = $1';
+      params.push(businessId);
+    }
+
+    query += ' ORDER BY name';
+
+    const result = await pool.query(query, params);
     res.json({ 
       success: true, 
       count: result.rows.length,
@@ -149,6 +261,7 @@ app.post('/api/sync/vendors', async (req, res) => {
       });
     }
 
+    const { id: businessId } = await getBusinessMetadata();
     let syncedCount = 0;
     let errors = [];
 
@@ -160,16 +273,17 @@ app.post('/api/sync/vendors', async (req, res) => {
         const currentBalance = parseFloat(vendor.CLOSINGBALANCE?._ || vendor.CLOSINGBALANCE || 0);
 
         await pool.query(
-          `INSERT INTO vendors (guid, name, opening_balance, current_balance, synced_at)
-           VALUES ($1, $2, $3, $4, NOW())
+          `INSERT INTO vendors (guid, name, business_id, opening_balance, current_balance, synced_at)
+           VALUES ($1, $2, $3, $4, $5, NOW())
            ON CONFLICT (guid)
            DO UPDATE SET
-             name = $2,
-             opening_balance = $3,
-             current_balance = $4,
+             name = EXCLUDED.name,
+             business_id = EXCLUDED.business_id,
+             opening_balance = EXCLUDED.opening_balance,
+             current_balance = EXCLUDED.current_balance,
              synced_at = NOW(),
              updated_at = NOW()`,
-          [guid, name, openingBalance, currentBalance]
+          [guid, name, businessId, openingBalance, currentBalance]
         );
         syncedCount++;
       } catch (err) {
@@ -201,9 +315,18 @@ app.post('/api/sync/vendors', async (req, res) => {
 // Get all customers from PostgreSQL
 app.get('/api/customers', async (req, res) => {
   try {
-    const result = await pool.query(
-      'SELECT * FROM customers ORDER BY name'
-    );
+    const { businessId } = req.query;
+    let query = 'SELECT * FROM customers';
+    const params = [];
+
+    if (businessId) {
+      query += ' WHERE business_id = $1';
+      params.push(businessId);
+    }
+
+    query += ' ORDER BY name';
+
+    const result = await pool.query(query, params);
     res.json({ 
       success: true, 
       count: result.rows.length,
@@ -304,16 +427,17 @@ app.post('/api/sync/customers', async (req, res) => {
         const currentBalance = parseFloat(customer.CLOSINGBALANCE?._ || customer.CLOSINGBALANCE || 0);
 
         await pool.query(
-          `INSERT INTO customers (guid, name, opening_balance, current_balance, synced_at)
-           VALUES ($1, $2, $3, $4, NOW())
+          `INSERT INTO customers (guid, name, business_id, opening_balance, current_balance, synced_at)
+           VALUES ($1, $2, $3, $4, $5, NOW())
            ON CONFLICT (guid)
            DO UPDATE SET
-             name = $2,
-             opening_balance = $3,
-             current_balance = $4,
+             name = EXCLUDED.name,
+             business_id = EXCLUDED.business_id,
+             opening_balance = EXCLUDED.opening_balance,
+             current_balance = EXCLUDED.current_balance,
              synced_at = NOW(),
              updated_at = NOW()`,
-          [guid, name, openingBalance, currentBalance]
+          [guid, name, businessId, openingBalance, currentBalance]
         );
         syncedCount++;
       } catch (err) {
@@ -345,11 +469,17 @@ app.post('/api/sync/customers', async (req, res) => {
 // Get all transactions from PostgreSQL
 app.get('/api/transactions', async (req, res) => {
   try {
-    const { limit = 100, offset = 0, type, startDate, endDate } = req.query;
+    const { limit = 100, offset = 0, type, startDate, endDate, businessId } = req.query;
     
     let query = 'SELECT * FROM transactions WHERE 1=1';
     const params = [];
     let paramCount = 1;
+
+    if (businessId) {
+      query += ` AND business_id = $${paramCount}`;
+      params.push(businessId);
+      paramCount++;
+    }
 
     if (type) {
       query += ` AND voucher_type = $${paramCount}`;
@@ -434,7 +564,7 @@ app.post('/api/sync/transactions', async (req, res) => {
               <TDLMESSAGE>
                 <COLLECTION NAME="Voucher Collection">
                   <TYPE>Voucher</TYPE>
-                  <FETCH>GUID, VoucherNumber, VoucherTypeName, Date, PartyLedgerName, Amount, Narration</FETCH>
+                  <FETCH>GUID, VoucherNumber, VoucherTypeName, Date, PartyLedgerName, Amount, Narration, ALLINVENTORYENTRIES.LIST:STOCKITEMNAME, ALLINVENTORYENTRIES.LIST:ITEMCODE</FETCH>
                 </COLLECTION>
               </TDLMESSAGE>
             </TDL>
@@ -458,6 +588,7 @@ app.post('/api/sync/transactions', async (req, res) => {
 
     console.log(`Found ${voucherArray.length} transactions`);
 
+    const { id: businessId } = await getBusinessMetadata();
     let syncedCount = 0;
     let errors = [];
 
@@ -470,6 +601,7 @@ app.post('/api/sync/transactions', async (req, res) => {
         const partyName = voucher.PARTYLEDGERNAME?._ || voucher.PARTYLEDGERNAME || '';
         const amount = Math.abs(parseFloat(voucher.AMOUNT?._ || voucher.AMOUNT || 0));
         const narration = voucher.NARRATION?._ || voucher.NARRATION || '';
+        const { itemName, itemCode } = summarizeInventoryEntries(voucher);
 
         // Format date from Tally format (YYYYMMDD) to PostgreSQL format (YYYY-MM-DD)
         let formattedDate = date;
@@ -479,20 +611,23 @@ app.post('/api/sync/transactions', async (req, res) => {
 
         await pool.query(
           `INSERT INTO transactions (
-            guid, voucher_number, voucher_type, date, party_name, amount, narration, synced_at
+            guid, voucher_number, voucher_type, business_id, item_name, item_code, date, party_name, amount, narration, synced_at
           )
-          VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())
           ON CONFLICT (guid)
           DO UPDATE SET
-            voucher_number = $2,
-            voucher_type = $3,
-            date = $4,
-            party_name = $5,
-            amount = $6,
-            narration = $7,
+            voucher_number = EXCLUDED.voucher_number,
+            voucher_type = EXCLUDED.voucher_type,
+            business_id = EXCLUDED.business_id,
+            item_name = EXCLUDED.item_name,
+            item_code = EXCLUDED.item_code,
+            date = EXCLUDED.date,
+            party_name = EXCLUDED.party_name,
+            amount = EXCLUDED.amount,
+            narration = EXCLUDED.narration,
             synced_at = NOW(),
             updated_at = NOW()`,
-          [guid, voucherNumber, voucherType, formattedDate, partyName, amount, narration]
+          [guid, voucherNumber, voucherType, businessId, itemName, itemCode, formattedDate, partyName, amount, narration]
         );
         syncedCount++;
       } catch (err) {
@@ -528,13 +663,15 @@ app.post('/api/sync/transactions', async (req, res) => {
 // Database stats endpoint
 app.get('/api/stats', async (req, res) => {
   try {
+    const { businessId } = req.query;
     const vendorStats = await pool.query(`
       SELECT 
         COUNT(*) as total_vendors,
         SUM(current_balance) as total_payables,
         MAX(synced_at) as last_vendor_sync
       FROM vendors
-    `);
+      ${businessId ? 'WHERE business_id = $1' : ''}
+    `, businessId ? [businessId] : []);
     
     const customerStats = await pool.query(`
       SELECT 
@@ -542,7 +679,8 @@ app.get('/api/stats', async (req, res) => {
         SUM(current_balance) as total_receivables,
         MAX(synced_at) as last_customer_sync
       FROM customers
-    `);
+      ${businessId ? 'WHERE business_id = $1' : ''}
+    `, businessId ? [businessId] : []);
     
     const transactionStats = await pool.query(`
       SELECT 
@@ -551,7 +689,16 @@ app.get('/api/stats', async (req, res) => {
         SUM(CASE WHEN voucher_type LIKE '%Receipt%' THEN amount ELSE 0 END) as total_receipts,
         MAX(synced_at) as last_transaction_sync
       FROM transactions
-    `);
+      ${businessId ? 'WHERE business_id = $1' : ''}
+    `, businessId ? [businessId] : []);
+
+    const timestamps = [
+      vendorStats.rows[0]?.last_vendor_sync,
+      customerStats.rows[0]?.last_customer_sync,
+      transactionStats.rows[0]?.last_transaction_sync
+    ].filter(Boolean).map(date => new Date(date).getTime());
+    const lastSyncValue = timestamps.length ? new Date(Math.max(...timestamps)) : null;
+    const businessMeta = await getBusinessMetadata();
     
     res.json({ 
       success: true, 
@@ -559,11 +706,11 @@ app.get('/api/stats', async (req, res) => {
         vendors: vendorStats.rows[0],
         customers: customerStats.rows[0],
         transactions: transactionStats.rows[0],
-        last_sync: new Date(Math.max(
-          new Date(vendorStats.rows[0].last_vendor_sync || 0),
-          new Date(customerStats.rows[0].last_customer_sync || 0),
-          new Date(transactionStats.rows[0].last_transaction_sync || 0)
-        ))
+        last_sync: lastSyncValue,
+        business: {
+          id: businessId || businessMeta.id,
+          name: businessMeta.name
+        }
       }
     });
   } catch (error) {

@@ -34,15 +34,22 @@ const initDB = async () => {
         id SERIAL PRIMARY KEY,
         guid VARCHAR(255) UNIQUE NOT NULL,
         name VARCHAR(255) NOT NULL,
+        business_id VARCHAR(255),
         opening_balance DECIMAL(15, 2) DEFAULT 0,
         current_balance DECIMAL(15, 2) DEFAULT 0,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         synced_at TIMESTAMP
       );
-
+    `);
+    await pool.query(`
+      ALTER TABLE vendors
+      ADD COLUMN IF NOT EXISTS business_id VARCHAR(255);
+    `);
+    await pool.query(`
       CREATE INDEX IF NOT EXISTS idx_vendor_guid ON vendors(guid);
       CREATE INDEX IF NOT EXISTS idx_vendor_name ON vendors(name);
+      CREATE INDEX IF NOT EXISTS idx_vendor_business ON vendors(business_id);
     `);
     console.log('✅ Vendors table initialized');
 
@@ -52,15 +59,22 @@ const initDB = async () => {
         id SERIAL PRIMARY KEY,
         guid VARCHAR(255) UNIQUE NOT NULL,
         name VARCHAR(255) NOT NULL,
+        business_id VARCHAR(255),
         opening_balance DECIMAL(15, 2) DEFAULT 0,
         current_balance DECIMAL(15, 2) DEFAULT 0,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         synced_at TIMESTAMP
       );
-
+    `);
+    await pool.query(`
+      ALTER TABLE customers
+      ADD COLUMN IF NOT EXISTS business_id VARCHAR(255);
+    `);
+    await pool.query(`
       CREATE INDEX IF NOT EXISTS idx_customer_guid ON customers(guid);
       CREATE INDEX IF NOT EXISTS idx_customer_name ON customers(name);
+      CREATE INDEX IF NOT EXISTS idx_customer_business ON customers(business_id);
     `);
     console.log('✅ Customers table initialized');
 
@@ -71,6 +85,9 @@ const initDB = async () => {
         guid VARCHAR(255) UNIQUE NOT NULL,
         voucher_number VARCHAR(100),
         voucher_type VARCHAR(50) NOT NULL,
+        business_id VARCHAR(255),
+        item_name VARCHAR(255),
+        item_code VARCHAR(255),
         date DATE NOT NULL,
         party_name VARCHAR(255),
         amount DECIMAL(15, 2) NOT NULL,
@@ -79,11 +96,25 @@ const initDB = async () => {
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         synced_at TIMESTAMP
       );
-
+    `);
+    await pool.query(`
+      ALTER TABLE transactions
+      ADD COLUMN IF NOT EXISTS business_id VARCHAR(255);
+    `);
+    await pool.query(`
+      ALTER TABLE transactions
+      ADD COLUMN IF NOT EXISTS item_name VARCHAR(255);
+    `);
+    await pool.query(`
+      ALTER TABLE transactions
+      ADD COLUMN IF NOT EXISTS item_code VARCHAR(255);
+    `);
+    await pool.query(`
       CREATE INDEX IF NOT EXISTS idx_transaction_guid ON transactions(guid);
       CREATE INDEX IF NOT EXISTS idx_transaction_date ON transactions(date);
       CREATE INDEX IF NOT EXISTS idx_transaction_type ON transactions(voucher_type);
       CREATE INDEX IF NOT EXISTS idx_transaction_party ON transactions(party_name);
+      CREATE INDEX IF NOT EXISTS idx_transaction_business ON transactions(business_id);
     `);
     console.log('✅ Transactions table initialized');
 
