@@ -238,3 +238,18 @@ ipcMain.handle('get-stats', async () => {
   // We'll implement this to fetch stats from backend
   return { vendors: 0, customers: 0, transactions: 0 };
 });
+
+// Handle navigation requests
+ipcMain.handle('navigate-to', async (event, page) => {
+  if (mainWindow) {
+    const filePath = path.join(__dirname, 'renderer', page);
+    if (fs.existsSync(filePath)) {
+      mainWindow.loadFile(filePath);
+      return { success: true };
+    } else {
+      console.error(`File not found: ${filePath}`);
+      return { success: false, error: 'File not found' };
+    }
+  }
+  return { success: false, error: 'Window not available' };
+});

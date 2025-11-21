@@ -9,5 +9,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   syncNow: () => ipcRenderer.invoke('sync-now'),
   
   // Open settings
-  openSettings: () => ipcRenderer.invoke('open-settings')
+  openSettings: () => ipcRenderer.invoke('open-settings'),
+  
+  // Navigate to a page
+  navigateTo: (page) => ipcRenderer.invoke('navigate-to', page)
 });

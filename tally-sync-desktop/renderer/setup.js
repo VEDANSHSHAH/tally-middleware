@@ -122,7 +122,20 @@ useDetectedBtn.addEventListener('click', async () => {
     const data = await response.json();
 
     if (data.success) {
-      window.location.href = 'index.html';
+      // Use Electron IPC for navigation if available, otherwise fallback to location
+      if (window.electronAPI && window.electronAPI.navigateTo) {
+        window.electronAPI.navigateTo('index.html').catch(() => {
+          // Fallback to location if IPC fails
+          setTimeout(() => {
+            window.location.replace('index.html');
+          }, 100);
+        });
+      } else {
+        // Fallback for non-Electron environments
+        setTimeout(() => {
+          window.location.replace('index.html');
+        }, 100);
+      }
     } else {
       autoErrorMsg.textContent = data.error || 'Failed to save';
       autoError.style.display = 'block';
@@ -223,7 +236,20 @@ manualForm.addEventListener('submit', async (e) => {
     const data = await response.json();
 
     if (data.success) {
-      window.location.href = 'index.html';
+      // Use Electron IPC for navigation if available, otherwise fallback to location
+      if (window.electronAPI && window.electronAPI.navigateTo) {
+        window.electronAPI.navigateTo('index.html').catch(() => {
+          // Fallback to location if IPC fails
+          setTimeout(() => {
+            window.location.replace('index.html');
+          }, 100);
+        });
+      } else {
+        // Fallback for non-Electron environments
+        setTimeout(() => {
+          window.location.replace('index.html');
+        }, 100);
+      }
     } else {
       showManualMessage('error', data.error || 'Failed to save');
       saveBtn.disabled = false;
