@@ -172,6 +172,20 @@ async function fetchStats() {
   if (!data.success) throw new Error('Stats request failed');
 
   const { vendors, customers, transactions, business } = data.stats;
+  
+  // Display company info if available
+  if (data.company) {
+    const companyInfoEl = document.getElementById('company-info');
+    const companyNameEl = document.getElementById('company-name-display');
+    const companyGuidEl = document.getElementById('company-guid-display');
+    
+    if (companyInfoEl && companyNameEl && companyGuidEl) {
+      companyNameEl.textContent = data.company.name || 'Unknown';
+      companyGuidEl.textContent = data.company.guid || '-';
+      companyInfoEl.style.display = 'block';
+    }
+  }
+  
   if (businessNameEl) {
     businessNameEl.textContent = (business && business.name) || 'Unknown business';
   }
@@ -474,10 +488,10 @@ function updateCollectionTarget(data) {
   const baseDate = target.calculated_at ? new Date(target.calculated_at) : new Date();
   const bucketLabel = target.current_0_30_days > 0 ? '0-30 days' :
     target.current_31_60_days > 0 ? '31-60 days' :
-    target.current_61_90_days > 0 ? '61-90 days' : '90+ days';
+      target.current_61_90_days > 0 ? '61-90 days' : '90+ days';
   const bucketDays = bucketLabel === '0-30 days' ? 30 :
     bucketLabel === '31-60 days' ? 60 :
-    bucketLabel === '61-90 days' ? 90 : 120;
+      bucketLabel === '61-90 days' ? 90 : 120;
   const dueDate = new Date(baseDate.getTime() + bucketDays * 86400000);
 
   collectionCustomer.textContent = target.entity_name || 'Unnamed';
@@ -579,7 +593,39 @@ function displayAIInsights(insights = []) {
 }
 
 async function askAIQuestion(question) {
-  const url = `${AI_API_URL}/ai/chat?question=${encodeURIComponent(question)}`;
+  // Gather context from the current dashboard state
+  const context = {
+    vendors: {
+      count: vendorCount.textContent,
+      payables: vendorAmount.textContent
+    },
+    customers: {
+      count: customerCount.textContent,
+      receivables: customerAmount.textContent,
+      totalSales: salesTotal.textContent
+    },
+    recentTransactions: transactionsCache.slice(0, 5).map(t =>
+      `${t.party_name}: ${formatCurrency(t.amount)} (${t.voucher_type})`
+    ).join(', '),
+    topCustomers: customersCache.slice(0, 5).map(c =>
+      `${c.name}: ${formatCurrency(c.current_balance)}`
+    ).join(', ')
+  };
+
+  const contextString = `
+    Context:
+    - Total Payables: ${context.vendors.payables} (${context.vendors.count} vendors)
+    - Total Receivables: ${context.customers.receivables} (${context.customers.count} customers)
+    - Total Sales: ${context.customers.totalSales}
+    - Recent Transactions: ${context.recentTransactions}
+    - Top Customers: ${context.topCustomers}
+    
+    User Question: ${question}
+  `.trim();
+
+  console.log('Sending to AI:', contextString);
+
+  const url = `${AI_API_URL}/ai/chat?question=${encodeURIComponent(contextString)}`;
   const response = await fetch(url, { method: 'POST' });
   const data = await response.json();
   if (!response.ok || !data.success) {
@@ -594,17 +640,55 @@ async function syncNow() {
   addLog('Starting manual sync');
 
   try {
-    await fetch(`${API_URL}/sync/vendors`, { method: 'POST' });
-    await fetch(`${API_URL}/sync/customers`, { method: 'POST' });
-    await fetch(`${API_URL}/sync/transactions`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) });
+    // Sync vendors
+    const vendorResponse = await fetch(`${API_URL}/sync/vendors`, { method: 'POST' });
+    const vendorData = await vendorResponse.json();
+    if (!vendorData.success) {
+      throw new Error(vendorData.error || 'Vendor sync failed');
+    }
+    addLog(`Vendors: ${vendorData.count || 0} synced`);
+    
+    // Sync customers
+    const customerResponse = await fetch(`${API_URL}/sync/customers`, { method: 'POST' });
+    const customerData = await customerResponse.json();
+    if (!customerData.success) {
+      throw new Error(customerData.error || 'Customer sync failed');
+    }
+    addLog(`Customers: ${customerData.count || 0} synced`);
+    
+    // Sync transactions
+    const transactionResponse = await fetch(`${API_URL}/sync/transactions`, { 
+      method: 'POST', 
+      headers: { 'Content-Type': 'application/json' }, 
+      body: JSON.stringify({}) 
+    });
+    const transactionData = await transactionResponse.json();
+    if (!transactionData.success) {
+      throw new Error(transactionData.error || 'Transaction sync failed');
+    }
+    addLog(`Transactions: ${transactionData.count || 0} synced`);
+    
+    // Calculate analytics
     await fetch(`${API_URL}/analytics/calculate`, { method: 'POST' });
+    addLog('Analytics calculated');
 
     aiInsightsLoaded = false;
-    addLog('Sync completed');
+    addLog('✅ Sync completed successfully');
     await loadDashboardData();
   } catch (error) {
     console.error('Sync error:', error);
-    addLog(`Sync failed: ${error.message}`);
+    addLog(`❌ Sync failed: ${error.message}`);
+    
+    // Check if it's a company mismatch error
+    if (error.message.includes('Company mismatch')) {
+      const errorMsg = error.message.replace(/\n/g, '\n');
+      if (confirm(`${errorMsg}\n\nWould you like to change company selection?`)) {
+        // Redirect to setup wizard
+        window.location.href = 'setup.html';
+      }
+    } else {
+      alert(`Sync Error: ${error.message}\n\nMake sure:\n1. The correct company is open in Tally\n2. Tally ODBC is enabled\n3. You selected the matching company in the setup wizard`);
+    }
   } finally {
     syncBtn.disabled = false;
     syncBtn.textContent = 'Sync Now';
@@ -628,6 +712,27 @@ async function refresh() {
 
 syncBtn.addEventListener('click', syncNow);
 refreshBtn.addEventListener('click', refresh);
+
+// Settings button - reset setup and show setup wizard
+document.getElementById('settings-btn')?.addEventListener('click', () => {
+  if (confirm('Do you want to change company settings? This will reset the current company and show the setup wizard.')) {
+    fetch(`${API_URL}/company/reset`, { method: 'POST' })
+      .then(response => response.json())
+      .then(data => {
+        if (data.success) {
+          console.log('✅ Company config reset successfully');
+          // Redirect to setup wizard
+          window.location.href = 'setup.html';
+        } else {
+          throw new Error(data.error || 'Failed to reset');
+        }
+      })
+      .catch(err => {
+        console.error('Reset error:', err);
+        alert('Error resetting settings: ' + err.message + '\n\nYou can manually delete config.json file to reset.');
+      });
+  }
+});
 aiQueryForm?.addEventListener('submit', async (event) => {
   event.preventDefault();
   const question = aiQuestionInput.value.trim();

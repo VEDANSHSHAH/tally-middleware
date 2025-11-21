@@ -1,9 +1,17 @@
 const { pool } = require('../db/postgres');
 
 // Calculate settlement cycles for vendors
-async function calculateVendorSettlementCycles() {
+async function calculateVendorSettlementCycles(companyGuid) {
   try {
-    console.log('Calculating vendor settlement cycles...');
+    if (!companyGuid) {
+      console.warn('⚠️ No company GUID provided for settlement cycles calculation');
+      return;
+    }
+    
+    console.log(`Calculating vendor settlement cycles for company: ${companyGuid}...`);
+    
+    // Delete existing cycles for this company - Cast to VARCHAR
+    await pool.query('DELETE FROM payment_cycles WHERE company_guid = CAST($1 AS VARCHAR)', [companyGuid]);
     
     const query = `
       WITH vendor_payments AS (
@@ -15,6 +23,8 @@ async function calculateVendorSettlementCycles() {
         FROM vendors v
         JOIN transactions t ON t.party_name = v.name
         WHERE t.voucher_type LIKE '%Payment%'
+          AND v.company_guid = CAST($1 AS VARCHAR)
+          AND t.company_guid = CAST($1 AS VARCHAR)
       ),
       settlement_data AS (
         SELECT 
@@ -30,6 +40,7 @@ async function calculateVendorSettlementCycles() {
         min_settlement_days,
         max_settlement_days,
         payment_count,
+        company_guid,
         calculated_at
       )
       SELECT 
@@ -39,13 +50,14 @@ async function calculateVendorSettlementCycles() {
         MIN(settlement_days),
         MAX(settlement_days),
         COUNT(*),
+        CAST($1 AS VARCHAR),
         NOW()
       FROM settlement_data
       GROUP BY vendor_id
       ON CONFLICT DO NOTHING
     `;
     
-    const result = await pool.query(query);
+    const result = await pool.query(query, [companyGuid]);
     console.log('Vendor settlement cycles calculated');
     return result;
   } catch (error) {
@@ -55,14 +67,19 @@ async function calculateVendorSettlementCycles() {
 }
 
 // Calculate outstanding aging
-async function calculateOutstandingAging() {
+async function calculateOutstandingAging(companyGuid) {
   try {
-    console.log('Calculating outstanding aging...');
+    if (!companyGuid) {
+      console.warn('⚠️ No company GUID provided for aging calculation');
+      return;
+    }
     
-    // Clear previous rows so each run rebuilds all entities
-    await pool.query('DELETE FROM outstanding_aging');
+    console.log(`Calculating outstanding aging for company: ${companyGuid}...`);
     
-    // For vendors (payables)
+    // Clear previous rows for this company only - Cast to VARCHAR explicitly
+    await pool.query('DELETE FROM outstanding_aging WHERE company_guid = CAST($1 AS VARCHAR)', [companyGuid]);
+    
+    // For vendors (payables) - Cast company_guid to VARCHAR to match column type
     const vendorQuery = `
       INSERT INTO outstanding_aging (
         vendor_id,
@@ -72,11 +89,12 @@ async function calculateOutstandingAging() {
         current_61_90_days,
         current_over_90_days,
         total_outstanding,
+        company_guid,
         calculated_at
       )
       SELECT 
         v.id,
-        'vendor',
+        'vendor'::VARCHAR,
         CASE WHEN v.synced_at > NOW() - INTERVAL '30 days' 
           THEN v.current_balance ELSE 0 END,
         CASE WHEN v.synced_at BETWEEN NOW() - INTERVAL '60 days' 
@@ -88,13 +106,15 @@ async function calculateOutstandingAging() {
         CASE WHEN v.synced_at < NOW() - INTERVAL '90 days' 
           THEN v.current_balance ELSE 0 END,
         v.current_balance,
+        CAST($1 AS VARCHAR),
         NOW()
       FROM vendors v
       WHERE v.current_balance > 0
+        AND v.company_guid = CAST($1 AS VARCHAR)
       ON CONFLICT DO NOTHING
     `;
     
-    // For customers (receivables)
+    // For customers (receivables) - Cast company_guid to VARCHAR to match column type
     const customerQuery = `
       INSERT INTO outstanding_aging (
         customer_id,
@@ -104,11 +124,12 @@ async function calculateOutstandingAging() {
         current_61_90_days,
         current_over_90_days,
         total_outstanding,
+        company_guid,
         calculated_at
       )
       SELECT 
         c.id,
-        'customer',
+        'customer'::VARCHAR,
         CASE WHEN c.synced_at > NOW() - INTERVAL '30 days' 
           THEN ABS(c.current_balance) ELSE 0 END,
         CASE WHEN c.synced_at BETWEEN NOW() - INTERVAL '60 days' 
@@ -120,14 +141,16 @@ async function calculateOutstandingAging() {
         CASE WHEN c.synced_at < NOW() - INTERVAL '90 days' 
           THEN ABS(c.current_balance) ELSE 0 END,
         ABS(c.current_balance),
+        CAST($1 AS VARCHAR),
         NOW()
       FROM customers c
       WHERE c.current_balance IS NOT NULL
+        AND c.company_guid = CAST($1 AS VARCHAR)
       ON CONFLICT DO NOTHING
     `;
     
-    const vendorResult = await pool.query(vendorQuery);
-    const customerResult = await pool.query(customerQuery);
+    const vendorResult = await pool.query(vendorQuery, [companyGuid]);
+    const customerResult = await pool.query(customerQuery, [companyGuid]);
     console.log('Outstanding aging calculated for vendors and customers');
     return { vendorResult, customerResult };
   } catch (error) {
@@ -137,9 +160,17 @@ async function calculateOutstandingAging() {
 }
 
 // Calculate vendor scores
-async function calculateVendorScores() {
+async function calculateVendorScores(companyGuid) {
   try {
-    console.log('Calculating vendor scores...');
+    if (!companyGuid) {
+      console.warn('⚠️ No company GUID provided for vendor scores calculation');
+      return;
+    }
+    
+    console.log(`Calculating vendor scores for company: ${companyGuid}...`);
+    
+    // Delete existing scores for this company - Cast to VARCHAR
+    await pool.query('DELETE FROM vendor_scores WHERE company_guid = CAST($1 AS VARCHAR)', [companyGuid]);
     
     const query = `
       WITH vendor_metrics AS (
@@ -150,8 +181,9 @@ async function calculateVendorScores() {
           SUM(t.amount) as total_amount,
           COALESCE(pc.on_time_percentage, 50) as on_time_pct
         FROM vendors v
-        LEFT JOIN transactions t ON t.party_name = v.name
-        LEFT JOIN payment_cycles pc ON pc.vendor_id = v.id
+        LEFT JOIN transactions t ON t.party_name = v.name AND t.company_guid = CAST($1 AS VARCHAR)
+        LEFT JOIN payment_cycles pc ON pc.vendor_id = v.id AND pc.company_guid = CAST($1 AS VARCHAR)
+        WHERE v.company_guid = CAST($1 AS VARCHAR)
         GROUP BY v.id, pc.on_time_percentage
       )
       INSERT INTO vendor_scores (
@@ -161,6 +193,7 @@ async function calculateVendorScores() {
         volume_score,
         overall_score,
         risk_level,
+        company_guid,
         calculated_at
       )
       SELECT 
@@ -184,6 +217,7 @@ async function calculateVendorScores() {
           WHEN (on_time_pct + 50) / 2 > 40 THEN 'medium'
           ELSE 'high'
         END,
+        CAST($1 AS VARCHAR),
         NOW()
       FROM vendor_metrics
       ON CONFLICT (vendor_id) 
@@ -193,10 +227,11 @@ async function calculateVendorScores() {
         volume_score = EXCLUDED.volume_score,
         overall_score = EXCLUDED.overall_score,
         risk_level = EXCLUDED.risk_level,
+        company_guid = EXCLUDED.company_guid,
         calculated_at = NOW()
     `;
     
-    const result = await pool.query(query);
+    const result = await pool.query(query, [companyGuid]);
     console.log('Vendor scores calculated');
     return result;
   } catch (error) {

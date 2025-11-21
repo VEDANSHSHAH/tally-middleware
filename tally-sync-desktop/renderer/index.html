@@ -9,8 +9,25 @@
 <body>
   <div class="container">
     <header>
-      <h1>Tally Cloud Sync</h1>
-      <p class="subtitle">Syncing your Tally data to the cloud with AI Analytics</p>
+      <div style="display: flex; justify-content: space-between; align-items: center; width: 100%;">
+        <div>
+          <h1>Tally Cloud Sync</h1>
+          <p class="subtitle">Syncing your Tally data to the cloud with AI Analytics</p>
+        </div>
+        <button id="settings-btn" class="settings-btn" title="Change Company Settings - Opens Setup Wizard">⚙️ Change Company</button>
+      </div>
+      <div id="company-info" class="company-info" style="margin-top: 15px; padding: 12px; background: #f0f4ff; border-radius: 8px; border-left: 4px solid #667eea; display: none;">
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+          <div>
+            <strong style="color: #667eea; font-size: 14px;">🏢 Company:</strong>
+            <span id="company-name-display" style="color: #333; margin-left: 8px; font-weight: 600;">-</span>
+          </div>
+          <div style="margin-left: 20px;">
+            <strong style="color: #667eea; font-size: 12px;">GUID:</strong>
+            <span id="company-guid-display" style="color: #666; margin-left: 8px; font-size: 12px; font-family: monospace;">-</span>
+          </div>
+        </div>
+      </div>
     </header>
 
     <div class="dashboard-grid">

@@ -26,6 +26,10 @@ body {
   padding: 30px 20px 60px;
 }
 
+header {
+  position: relative;
+}
+
 header h1 {
   font-size: 28px;
   margin-bottom: 4px;
@@ -34,6 +38,39 @@ header h1 {
 .subtitle {
   color: var(--muted);
   margin-top: 0;
+}
+
+.settings-btn {
+  background: white;
+  border: 2px solid #667eea;
+  color: #667eea;
+  padding: 10px 20px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 14px;
+  transition: all 0.3s;
+  z-index: 1000;
+  position: relative;
+}
+
+.settings-btn:hover {
+  background: #667eea;
+  color: white;
+  transform: translateY(-2px);
+  box-shadow: 0 5px 15px rgba(102, 126, 234, 0.3);
+}
+
+.settings-btn:active {
+  transform: translateY(0);
+}
+
+.company-info {
+  margin-top: 15px;
+  padding: 12px;
+  background: #f0f4ff;
+  border-radius: 8px;
+  border-left: 4px solid #667eea;
 }
 
 .dashboard-grid {

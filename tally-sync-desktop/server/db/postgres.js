@@ -118,10 +118,126 @@ const initDB = async () => {
     `);
     console.log('✅ Transactions table initialized');
 
+    // Create companies table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS companies (
+        id SERIAL PRIMARY KEY,
+        company_guid VARCHAR(255) UNIQUE NOT NULL,
+        company_name VARCHAR(500) NOT NULL,
+        tally_company_name VARCHAR(500),
+        verified BOOLEAN DEFAULT false,
+        registered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        last_sync TIMESTAMP,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+    await pool.query(`
+      CREATE INDEX IF NOT EXISTS idx_companies_guid ON companies(company_guid);
+    `);
+    console.log('✅ Companies table initialized');
+
+    // Add company_guid columns if they don't exist
+    await pool.query(`
+      ALTER TABLE vendors ADD COLUMN IF NOT EXISTS company_guid VARCHAR(255);
+      ALTER TABLE customers ADD COLUMN IF NOT EXISTS company_guid VARCHAR(255);
+      ALTER TABLE transactions ADD COLUMN IF NOT EXISTS company_guid VARCHAR(255);
+    `);
+    await pool.query(`
+      CREATE INDEX IF NOT EXISTS idx_vendors_company ON vendors(company_guid);
+      CREATE INDEX IF NOT EXISTS idx_customers_company ON customers(company_guid);
+      CREATE INDEX IF NOT EXISTS idx_transactions_company ON transactions(company_guid);
+    `);
+
+    // Add company_guid to analytics tables if they exist
+    await pool.query(`
+      DO $$ 
+      BEGIN
+        IF EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'vendor_scores') THEN
+          ALTER TABLE vendor_scores ADD COLUMN IF NOT EXISTS company_guid VARCHAR(255);
+          CREATE INDEX IF NOT EXISTS idx_vendor_scores_company ON vendor_scores(company_guid);
+        END IF;
+        
+        IF EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'outstanding_aging') THEN
+          ALTER TABLE outstanding_aging ADD COLUMN IF NOT EXISTS company_guid VARCHAR(255);
+          CREATE INDEX IF NOT EXISTS idx_outstanding_aging_company ON outstanding_aging(company_guid);
+        END IF;
+        
+        IF EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'payment_cycles') THEN
+          ALTER TABLE payment_cycles ADD COLUMN IF NOT EXISTS company_guid VARCHAR(255);
+          CREATE INDEX IF NOT EXISTS idx_payment_cycles_company ON payment_cycles(company_guid);
+        END IF;
+      END $$;
+    `);
+    console.log('✅ Company GUID columns added');
+
     console.log('✅ Database tables initialized successfully');
+
+    // Update constraints for data bifurcation
+    await updateSchemaConstraints();
+
   } catch (error) {
     console.error('❌ Database initialization error:', error.message);
     throw error;
+  }
+};
+
+// Update constraints to allow same GUID for different companies
+const updateSchemaConstraints = async () => {
+  try {
+    console.log('🔄 Checking schema constraints...');
+
+    // Vendors
+    await pool.query(`
+      DO $$ 
+      BEGIN
+        -- Drop old unique constraint if exists
+        IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'vendors_guid_key') THEN
+          ALTER TABLE vendors DROP CONSTRAINT vendors_guid_key;
+        END IF;
+        
+        -- Add new composite unique constraint if not exists
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'vendors_guid_company_key') THEN
+          ALTER TABLE vendors ADD CONSTRAINT vendors_guid_company_key UNIQUE (guid, company_guid);
+        END IF;
+      END $$;
+    `);
+
+    // Customers
+    await pool.query(`
+      DO $$ 
+      BEGIN
+        -- Drop old unique constraint if exists
+        IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'customers_guid_key') THEN
+          ALTER TABLE customers DROP CONSTRAINT customers_guid_key;
+        END IF;
+        
+        -- Add new composite unique constraint if not exists
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'customers_guid_company_key') THEN
+          ALTER TABLE customers ADD CONSTRAINT customers_guid_company_key UNIQUE (guid, company_guid);
+        END IF;
+      END $$;
+    `);
+
+    // Transactions
+    await pool.query(`
+      DO $$ 
+      BEGIN
+        -- Drop old unique constraint if exists
+        IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'transactions_guid_key') THEN
+          ALTER TABLE transactions DROP CONSTRAINT transactions_guid_key;
+        END IF;
+        
+        -- Add new composite unique constraint if not exists
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'transactions_guid_company_key') THEN
+          ALTER TABLE transactions ADD CONSTRAINT transactions_guid_company_key UNIQUE (guid, company_guid);
+        END IF;
+      END $$;
+    `);
+
+    console.log('✅ Schema constraints updated for data bifurcation');
+  } catch (error) {
+    console.error('❌ Error updating schema constraints:', error.message);
+    // Don't throw, just log - might fail if data violates new constraint (duplicates)
   }
 };
 
