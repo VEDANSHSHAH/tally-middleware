@@ -4,7 +4,18 @@ const axios = require('axios');
 const xml2js = require('xml2js');
 const fs = require('fs');
 const path = require('path');
-require('dotenv').config();
+
+// Load environment variables from root directory
+const envPath = path.resolve(__dirname, '../../..', '.env');
+console.log('Loading .env from:', envPath);
+const envResult = require('dotenv').config({ path: envPath });
+if (envResult.error) {
+  console.warn('⚠️ Could not load .env file:', envResult.error.message);
+  console.warn('   Trying current directory...');
+  require('dotenv').config(); // Fallback to current directory
+} else {
+  console.log('✅ Environment variables loaded from:', envPath);
+}
 
 const { pool, initDB } = require('./db/postgres');
 const { getCompanyInfo, getAllCompanies } = require('./tally/companyInfo');
@@ -189,11 +200,14 @@ function summarizeInventoryEntries(voucher) {
 
 // Test endpoint
 app.get('/api/test', (req, res) => {
+  const dbStatus = pool ? 'Connected' : 'Not configured (DATABASE_URL missing)';
   res.json({
     message: 'Tally Middleware is running',
     timestamp: new Date(),
-    database: 'PostgreSQL (Neon)',
-    tallyUrl: TALLY_URL
+    database: dbStatus,
+    databaseUrl: process.env.DATABASE_URL ? 'Configured' : 'Missing',
+    tallyUrl: TALLY_URL,
+    status: 'ok'
   });
 });
 
@@ -1463,7 +1477,12 @@ const server = app.listen(PORT, () => {
   console.log(`\n🚀 Tally Middleware Server Started`);
   console.log(`📍 Server: http://localhost:${PORT}`);
   console.log(`📊 Tally: ${TALLY_URL}`);
-  console.log(`💾 Database: PostgreSQL (Neon)`);
+  const dbStatus = pool ? '✅ Connected' : '⚠️ Not configured (DATABASE_URL missing)';
+  console.log(`💾 Database: ${dbStatus}`);
+  if (!pool) {
+    console.log(`   ⚠️  Create a .env file in the root directory with:`);
+    console.log(`   ⚠️  DATABASE_URL=your_postgres_connection_string`);
+  }
   console.log(`\nAvailable endpoints:`);
   console.log(`   GET  /api/test`);
   console.log(`   GET  /api/company/detect ⭐ NEW`);

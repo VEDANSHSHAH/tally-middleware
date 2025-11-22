@@ -12,21 +12,36 @@ if (result.error) {
 }
 console.log('DATABASE_URL exists?', !!process.env.DATABASE_URL);
 
-const pool = new Pool({
+if (!process.env.DATABASE_URL) {
+  console.warn('⚠️ WARNING: DATABASE_URL not found in environment variables!');
+  console.warn('   Server will start but database operations will fail.');
+  console.warn('   Please create a .env file in the root directory with:');
+  console.warn('   DATABASE_URL=your_postgres_connection_string');
+}
+
+const pool = process.env.DATABASE_URL ? new Pool({
   connectionString: process.env.DATABASE_URL
-});
+}) : null;
 
 // Test connection
-pool.on('connect', () => {
-  console.log('✅ Connected to PostgreSQL (Neon)');
-});
+if (pool) {
+  pool.on('connect', () => {
+    console.log('✅ Connected to PostgreSQL (Neon)');
+  });
 
-pool.on('error', (err) => {
-  console.error('❌ PostgreSQL connection error:', err);
-});
+  pool.on('error', (err) => {
+    console.error('❌ PostgreSQL connection error:', err);
+  });
+} else {
+  console.warn('⚠️ Database pool not initialized (DATABASE_URL missing)');
+}
 
 // Create tables if they don't exist
 const initDB = async () => {
+  if (!pool) {
+    throw new Error('DATABASE_URL not configured. Please set DATABASE_URL in .env file');
+  }
+  
   try {
     // Create vendors table
     await pool.query(`

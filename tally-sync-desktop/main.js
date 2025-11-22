@@ -2,10 +2,17 @@ const { app, BrowserWindow, Tray, Menu, ipcMain } = require('electron');
 const path = require('path');
 const { spawn } = require('child_process');
 const fs = require('fs');
+const http = require('http');
+
+// Load environment variables (same as server)
+const envPath = path.resolve(__dirname, '..', '.env');
+require('dotenv').config({ path: envPath });
+const PORT = process.env.PORT || 3000;
 
 let tray = null;
 let mainWindow = null;
 let serverProcess = null;
+let serverReady = false;
 
 // Start the Node.js backend server
 function startBackend() {
@@ -34,6 +41,10 @@ function startBackend() {
     // Check if server started successfully
     if (output.includes('Tally Middleware Server Started')) {
       console.log('✅ Backend server started successfully!');
+      // Wait a bit more for server to fully initialize, then check if it's ready
+      setTimeout(() => {
+        checkServerReady();
+      }, 1000);
     }
   });
 
@@ -43,16 +54,27 @@ function startBackend() {
     
     // Show critical errors
     if (error.includes('EADDRINUSE')) {
-      console.error('❌ Port 3000 is already in use!');
-    } else if (error.includes('Failed to initialize database')) {
-      console.error('❌ Database initialization failed!');
+      console.error(`❌ Port ${PORT} is already in use!`);
+      console.error(`   Please close the process using port ${PORT} or change the PORT in .env`);
+    } else if (error.includes('Failed to initialize database') || error.includes('DATABASE_URL')) {
+      console.error('❌ Database connection issue!');
+      console.error('   Make sure DATABASE_URL is set in .env file');
+    } else if (error.includes('Cannot find module')) {
+      console.error('❌ Missing dependencies!');
+      console.error('   Run: npm install in tally-sync-desktop directory');
     }
   });
 
   serverProcess.on('close', (code) => {
+    serverReady = false;
     if (code !== 0 && code !== null) {
       console.error(`❌ Backend server exited with code ${code}`);
       console.error('   This usually means the server crashed. Check errors above.');
+      console.error('   Common causes:');
+      console.error('   - Missing DATABASE_URL in .env file');
+      console.error(`   - Port ${PORT} already in use`);
+      console.error('   - Missing Node.js dependencies (run: npm install)');
+      console.error('   - Syntax errors in server.js');
     } else {
       console.log(`Backend server exited with code ${code}`);
     }
@@ -63,7 +85,52 @@ function startBackend() {
     if (error.code === 'ENOENT') {
       console.error('   Node.js not found! Make sure Node.js is installed.');
     }
+    serverReady = false;
   });
+}
+
+// Check if server is ready by making a test request
+async function checkServerReady() {
+  const maxAttempts = 10;
+  let attempts = 0;
+
+  const check = () => {
+    attempts++;
+    const req = http.get(`http://localhost:${PORT}/api/test`, (res) => {
+      if (res.statusCode === 200) {
+        serverReady = true;
+        console.log('✅ Server is ready and responding!');
+        if (mainWindow) {
+          // Reload the page if window is already open
+          mainWindow.reload();
+        }
+      } else {
+        if (attempts < maxAttempts) {
+          setTimeout(check, 500);
+        } else {
+          console.error('❌ Server not responding after multiple attempts');
+        }
+      }
+    });
+
+    req.on('error', (err) => {
+      if (attempts < maxAttempts) {
+        setTimeout(check, 500);
+      } else {
+        console.error('❌ Server not ready after', maxAttempts, 'attempts');
+        console.error('   Error:', err.message);
+      }
+    });
+
+    req.setTimeout(2000, () => {
+      req.destroy();
+      if (attempts < maxAttempts) {
+        setTimeout(check, 500);
+      }
+    });
+  };
+
+  check();
 }
 
 // Create system tray
@@ -148,7 +215,8 @@ function createWindow() {
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       nodeIntegration: false,
-      contextIsolation: true
+      contextIsolation: true,
+      webSecurity: false // Allow file:// to http:// requests in Electron
     }
   };
 
@@ -159,6 +227,12 @@ function createWindow() {
   }
 
   mainWindow = new BrowserWindow(windowOptions);
+
+  // Disable web security for local development (allows file:// to http:// requests)
+  // This is safe for Electron apps as they run locally
+  mainWindow.webContents.session.webRequest.onBeforeSendHeaders((details, callback) => {
+    callback({ requestHeaders: { ...details.requestHeaders } });
+  });
 
   // Always show setup wizard on startup (as requested)
   // User can select company and then proceed to dashboard
@@ -202,11 +276,23 @@ app.whenReady().then(() => {
   // Start backend server
   startBackend();
 
-  // Wait 5 seconds for server to start, then open UI
-  setTimeout(() => {
-    createWindow();
-    createTray();
-  }, 5000);
+  // Wait for server to start, then open UI
+  // Check every 500ms for up to 15 seconds
+  let attempts = 0;
+  const maxAttempts = 30; // 15 seconds total
+  
+  const waitForServer = setInterval(() => {
+    attempts++;
+    if (serverReady || attempts >= maxAttempts) {
+      clearInterval(waitForServer);
+      if (!serverReady && attempts >= maxAttempts) {
+        console.warn('⚠️ Server not ready after 15 seconds, opening UI anyway...');
+        console.warn('   The UI will show connection errors until the server starts');
+      }
+      createWindow();
+      createTray();
+    }
+  }, 500);
 });
 
 app.on('window-all-closed', () => {
@@ -252,4 +338,9 @@ ipcMain.handle('navigate-to', async (event, page) => {
     }
   }
   return { success: false, error: 'Window not available' };
+});
+
+// Handle API URL request (returns the correct port)
+ipcMain.handle('get-api-url', async () => {
+  return `http://localhost:${PORT}/api`;
 });

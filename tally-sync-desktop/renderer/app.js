@@ -1,6 +1,20 @@
-// API base URLs
-const API_URL = 'http://localhost:8000/api';
+// Get API URL from electronAPI if available, otherwise use default
+let API_URL = 'http://localhost:3000/api';
 const AI_API_URL = 'https://tally-middleware-production-7856.up.railway.app';
+
+// Initialize API URL on page load (wait for it to complete)
+let apiUrlInitialized = false;
+(async () => {
+  if (window.electronAPI && window.electronAPI.getApiUrl) {
+    try {
+      API_URL = await window.electronAPI.getApiUrl();
+      console.log('API URL initialized:', API_URL);
+    } catch (error) {
+      console.warn('Could not get API URL from main process, using default:', error);
+    }
+  }
+  apiUrlInitialized = true;
+})();
 
 // Core DOM elements
 const connectionStatus = document.getElementById('connection-status');
@@ -146,23 +160,56 @@ aiInsightsModal?.addEventListener('click', (event) => {
   }
 });
 
-async function testConnection() {
-  try {
-    const response = await fetch(`${API_URL}/test`);
-    const data = await response.json();
-    if (data.message) {
-      connectionStatus.textContent = 'Connected to Tally';
-      connectionStatus.style.color = '#28a745';
-      addLog('Connected to backend server');
-      return true;
-    }
-  } catch (error) {
-    console.error('Connection test failed:', error);
+async function testConnection(retries = 5, interval = 1000) {
+  // Show connecting state initially
+  if (connectionStatus) {
+    connectionStatus.textContent = 'Connecting...';
+    connectionStatus.style.color = '#ffc107';
   }
 
-  connectionStatus.textContent = 'Connection Failed';
-  connectionStatus.style.color = '#dc3545';
-  addLog('Failed to connect to backend');
+  for (let attempt = 0; attempt < retries; attempt++) {
+    try {
+      // Create a timeout promise
+      const timeoutPromise = new Promise((_, reject) => 
+        setTimeout(() => reject(new Error('Request timeout')), 2000)
+      );
+      
+      // Race between fetch and timeout
+      const response = await Promise.race([
+        fetch(`${API_URL}/test`),
+        timeoutPromise
+      ]);
+      
+      const data = await response.json();
+      if (data.message) {
+        if (connectionStatus) {
+          connectionStatus.textContent = 'Connected to Tally';
+          connectionStatus.style.color = '#28a745';
+        }
+        addLog('Connected to backend server');
+        return true;
+      }
+    } catch (error) {
+      console.error(`Connection test attempt ${attempt + 1} failed:`, error);
+      
+      // If not the last attempt, wait before retrying
+      if (attempt < retries - 1) {
+        if (connectionStatus) {
+          connectionStatus.textContent = `Connecting... (${attempt + 1}/${retries})`;
+          connectionStatus.style.color = '#ffc107';
+        }
+        await new Promise(resolve => setTimeout(resolve, interval));
+        continue;
+      }
+    }
+  }
+
+  // All retries failed
+  if (connectionStatus) {
+    connectionStatus.textContent = 'Connection Failed';
+    connectionStatus.style.color = '#dc3545';
+  }
+  addLog('Failed to connect to backend after multiple attempts');
   return false;
 }
 
@@ -757,10 +804,40 @@ aiQueryForm?.addEventListener('submit', async (event) => {
 
 async function init() {
   addLog('Application started');
-  const connected = await testConnection();
+  
+  // Wait for API_URL to be initialized (max 2 seconds)
+  let waitTime = 0;
+  while (!apiUrlInitialized && waitTime < 2000) {
+    await new Promise(resolve => setTimeout(resolve, 100));
+    waitTime += 100;
+  }
+  
+  // Ensure API_URL is set (double-check)
+  if (window.electronAPI && window.electronAPI.getApiUrl && !apiUrlInitialized) {
+    try {
+      API_URL = await window.electronAPI.getApiUrl();
+      console.log('API URL initialized in init():', API_URL);
+    } catch (error) {
+      console.warn('Could not get API URL, using default');
+    }
+  }
+  
+  // Test connection with retries (5 attempts, 1 second apart)
+  const connected = await testConnection(5, 1000);
+  
   if (!connected) {
-    addLog('Retrying connection in 5 seconds');
-    setTimeout(init, 5000);
+    // If still not connected, retry with longer intervals
+    addLog('Retrying connection in 3 seconds...');
+    setTimeout(() => {
+      testConnection(3, 2000).then(connected => {
+        if (connected) {
+          loadDashboardData().catch(error => {
+            console.error('Error loading dashboard:', error);
+            addLog('Failed to load data: ' + error.message);
+          });
+        }
+      });
+    }, 3000);
     return;
   }
 

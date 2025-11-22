@@ -12,5 +12,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   openSettings: () => ipcRenderer.invoke('open-settings'),
   
   // Navigate to a page
-  navigateTo: (page) => ipcRenderer.invoke('navigate-to', page)
+  navigateTo: (page) => ipcRenderer.invoke('navigate-to', page),
+  
+  // Get API URL (with correct port from main process)
+  getApiUrl: () => ipcRenderer.invoke('get-api-url')
 });

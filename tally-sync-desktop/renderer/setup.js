@@ -1,4 +1,17 @@
-const API_URL = 'http://localhost:8000/api';
+// Get API URL from electronAPI if available, otherwise use default
+let API_URL = 'http://localhost:3000/api';
+
+// Initialize API URL on page load
+(async () => {
+  if (window.electronAPI && window.electronAPI.getApiUrl) {
+    try {
+      API_URL = await window.electronAPI.getApiUrl();
+      console.log('API URL:', API_URL);
+    } catch (error) {
+      console.warn('Could not get API URL from main process, using default:', error);
+    }
+  }
+})();
 
 // Tab Switching Logic
 const tabButtons = document.querySelectorAll('.tab-btn');
@@ -34,19 +47,68 @@ let selectedAutoCompany = null;
 autoDetectBtn.addEventListener('click', async () => {
   // Reset UI
   detectStatus.style.display = 'block';
-  detectStatus.innerHTML = '<span class="loading-spinner"></span> Detecting Tally company...';
+  detectStatus.innerHTML = '<span class="loading-spinner"></span> Connecting to server...';
   companySelectContainer.style.display = 'none';
   detectedInfo.style.display = 'none';
   autoError.style.display = 'none';
   useDetectedBtn.disabled = true;
 
   try {
-    // First check if server is up
-    const testRes = await fetch(`${API_URL}/test`);
-    if (!testRes.ok) throw new Error('Server not ready');
+    // First check if server is up with retry logic
+    let testRes = null;
+    let retries = 0;
+    const maxRetries = 5;
+    
+    while (retries < maxRetries) {
+      try {
+        // Create a timeout promise
+        const timeoutPromise = new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('Request timeout')), 2000)
+        );
+        
+        // Race between fetch and timeout
+        testRes = await Promise.race([
+          fetch(`${API_URL}/test`),
+          timeoutPromise
+        ]);
+        
+        if (testRes && testRes.ok) break;
+      } catch (err) {
+        if (retries < maxRetries - 1) {
+          detectStatus.innerHTML = `<span class="loading-spinner"></span> Waiting for server... (${retries + 1}/${maxRetries})`;
+          await new Promise(resolve => setTimeout(resolve, 1000));
+          retries++;
+          continue;
+        } else {
+          const port = API_URL.match(/:(\d+)/)?.[1] || '3000';
+          throw new Error(`Could not connect to the server. Make sure:\n1. The backend server is running on port ${port}\n2. Check the console for server errors`);
+        }
+      }
+      retries++;
+    }
+    
+    if (!testRes || !testRes.ok) {
+      const port = API_URL.match(/:(\d+)/)?.[1] || '3000';
+      throw new Error(`Server not ready. Make sure the backend server is running on port ${port}.`);
+    }
+    
+    detectStatus.innerHTML = '<span class="loading-spinner"></span> Detecting Tally company...';
 
     // Try to detect company
     const response = await fetch(`${API_URL}/company/detect`);
+    
+    if (!response.ok) {
+      // Try to get error message from response
+      let errorMsg = 'Server error occurred';
+      try {
+        const errorData = await response.json();
+        errorMsg = errorData.error || errorMsg;
+      } catch (e) {
+        errorMsg = `HTTP ${response.status}: ${response.statusText}`;
+      }
+      throw new Error(errorMsg);
+    }
+
     const data = await response.json();
 
     if (data.success && data.companies && data.companies.length > 0) {
@@ -74,13 +136,28 @@ autoDetectBtn.addEventListener('click', async () => {
       }
     } else {
       detectStatus.style.display = 'none';
-      autoErrorMsg.textContent = 'No company detected. Please make sure Tally is running and a company is open.';
+      // Show server error message if available
+      const errorMsg = data.error || 'No company detected. Please make sure Tally is running and a company is open.';
+      autoErrorMsg.innerHTML = errorMsg.replace(/\n/g, '<br>');
       autoError.style.display = 'block';
     }
   } catch (error) {
     console.error('Auto-detect failed:', error);
     detectStatus.style.display = 'none';
-    autoErrorMsg.textContent = 'Could not connect to Tally. Please check if Tally is running.';
+    // Show detailed error message
+    let errorMsg = error.message || 'Could not connect to Tally.';
+    
+    // Provide helpful guidance based on error type
+    if (error.message.includes('Failed to fetch') || error.message.includes('NetworkError')) {
+      const port = API_URL.match(/:(\d+)/)?.[1] || '3000';
+      errorMsg = `Could not connect to the server. Make sure:\n1. The backend server is running on port ${port}\n2. Check the console for server errors`;
+    } else if (error.message.includes('ECONNREFUSED') || error.message.includes('port 9000')) {
+      errorMsg = 'Cannot connect to Tally on port 9000.\n\nPlease:\n1. Open Tally application\n2. Open a company in Tally\n3. Enable ODBC: Press F12 → Advanced Configuration → Enable ODBC Server';
+    } else if (error.message.includes('timeout') || error.message.includes('ETIMEDOUT')) {
+      errorMsg = 'Tally connection timed out.\n\nPlease:\n1. Make sure Tally is running\n2. Open a company in Tally\n3. Enable ODBC: Press F12 → Advanced Configuration → Enable ODBC Server\n4. Check if port 9000 is blocked by firewall';
+    }
+    
+    autoErrorMsg.textContent = errorMsg;
     autoError.style.display = 'block';
   }
 });
