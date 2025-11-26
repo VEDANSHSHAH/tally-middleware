@@ -165,6 +165,15 @@ const extractValue = (value) => {
   return value;
 };
 
+// Format currency in Indian format (₹ with commas)
+function formatCurrency(amount) {
+  if (amount === null || amount === undefined || isNaN(amount)) return '₹0';
+  return '₹' + Math.abs(amount).toLocaleString('en-IN', { 
+    minimumFractionDigits: 2, 
+    maximumFractionDigits: 2 
+  });
+}
+
 // Initialize database on startup (don't exit on error, just log it)
 initDB().catch(err => {
   console.error('⚠️ Failed to initialize database:', err.message);
@@ -676,32 +685,37 @@ app.post('/api/company/reset', (req, res) => {
 
 // ==================== VENDORS ====================
 
-// Get all vendors from PostgreSQL
+// Get all vendors from PostgreSQL (using new ledgers table)
 app.get('/api/vendors', async (req, res) => {
   try {
     const config = loadConfig();
     const companyGuid = config?.company?.guid;
     const { businessId } = req.query;
-    let query = 'SELECT * FROM vendors';
-    const params = [];
-    let paramCount = 1;
-
-    if (!companyGuid) {
-      return res.json({
-        success: false,
-        error: 'Company not configured. Please run setup first.'
-      });
-    }
-
-    query += ` WHERE company_guid = $${paramCount}`;
-    params.push(companyGuid);
-    paramCount++;
-
-    if (businessId) {
-      query += ` AND business_id = $${paramCount}`;
-      params.push(businessId);
-      paramCount++;
-    }
+    
+    // Use ledgers table with backward compatibility mapping
+    let query = `
+      SELECT 
+        id,
+        guid,
+        name,
+        current_balance as current_balance,
+        opening_balance,
+        gstin,
+        pan,
+        state,
+        city,
+        pincode,
+        primary_phone,
+        primary_email,
+        synced_at,
+        created_at,
+        updated_at
+      FROM ledgers
+      WHERE company_guid = $1
+        AND ledger_type = 'Vendor'
+        AND active = TRUE
+    `;
+    const params = [companyGuid];
 
     query += ' ORDER BY name';
 
@@ -717,7 +731,7 @@ app.get('/api/vendors', async (req, res) => {
   }
 });
 
-// Get single vendor by ID
+// Get single vendor by ID (using new ledgers table)
 app.get('/api/vendors/:id', async (req, res) => {
   try {
     const config = loadConfig();
@@ -731,7 +745,11 @@ app.get('/api/vendors/:id', async (req, res) => {
     }
 
     const result = await pool.query(
-      'SELECT * FROM vendors WHERE id = $1 AND company_guid = $2',
+      `SELECT 
+        id, guid, name, current_balance, opening_balance, gstin, pan, state, city, pincode,
+        primary_phone, primary_email, synced_at, created_at, updated_at
+       FROM ledgers 
+       WHERE id = $1 AND company_guid = $2 AND ledger_type = 'Vendor'`,
       [req.params.id, companyGuid]
     );
 
@@ -914,32 +932,37 @@ app.post('/api/sync/vendors', async (req, res) => {
 
 // ==================== CUSTOMERS ====================
 
-// Get all customers from PostgreSQL
+// Get all customers from PostgreSQL (using new ledgers table)
 app.get('/api/customers', async (req, res) => {
   try {
     const config = loadConfig();
     const companyGuid = config?.company?.guid;
     const { businessId } = req.query;
-    let query = 'SELECT * FROM customers';
-    const params = [];
-    let paramCount = 1;
-
-    if (!companyGuid) {
-      return res.json({
-        success: false,
-        error: 'Company not configured. Please run setup first.'
-      });
-    }
-
-    query += ` WHERE company_guid = $${paramCount}`;
-    params.push(companyGuid);
-    paramCount++;
-
-    if (businessId) {
-      query += ` AND business_id = $${paramCount}`;
-      params.push(businessId);
-      paramCount++;
-    }
+    
+    // Use ledgers table with backward compatibility mapping
+    let query = `
+      SELECT 
+        id,
+        guid,
+        name,
+        current_balance as current_balance,
+        opening_balance,
+        gstin,
+        pan,
+        state,
+        city,
+        pincode,
+        primary_phone,
+        primary_email,
+        synced_at,
+        created_at,
+        updated_at
+      FROM ledgers
+      WHERE company_guid = $1
+        AND ledger_type = 'Customer'
+        AND active = TRUE
+    `;
+    const params = [companyGuid];
 
     query += ' ORDER BY name';
 
@@ -973,7 +996,7 @@ app.get('/api/customers', async (req, res) => {
   }
 });
 
-// Get single customer by ID
+// Get single customer by ID (using new ledgers table)
 app.get('/api/customers/:id', async (req, res) => {
   try {
     const config = loadConfig();
@@ -987,7 +1010,11 @@ app.get('/api/customers/:id', async (req, res) => {
     }
 
     const result = await pool.query(
-      'SELECT * FROM customers WHERE id = $1 AND company_guid = $2',
+      `SELECT 
+        id, guid, name, current_balance, opening_balance, gstin, pan, state, city, pincode,
+        primary_phone, primary_email, synced_at, created_at, updated_at
+       FROM ledgers 
+       WHERE id = $1 AND company_guid = $2 AND ledger_type = 'Customer'`,
       [req.params.id, companyGuid]
     );
 
@@ -1357,6 +1384,1472 @@ app.get('/api/transactions/:id', async (req, res) => {
     res.status(500).json({ success: false, error: error.message });
   }
 });
+
+// ==================== GROUPS SYNC ====================
+
+// Sync Groups from Tally
+app.post('/api/sync/groups', async (req, res) => {
+  try {
+    console.log('🔄 Starting groups sync from Tally...');
+    const config = loadConfig();
+    const companyGuid = config?.company?.guid;
+
+    if (!companyGuid) {
+      return res.json({
+        success: false,
+        error: 'Company not configured. Please run setup first.'
+      });
+    }
+
+    // Verify Tally company
+    const tallyCompanyInfo = await getCompanyInfo();
+    if (!tallyCompanyInfo || tallyCompanyInfo.guid.toLowerCase() !== companyGuid.toLowerCase()) {
+      return res.json({
+        success: false,
+        error: 'Company mismatch. Please open the correct company in Tally.'
+      });
+    }
+
+    // XML request to fetch all groups
+    const xmlRequest = `
+      <ENVELOPE>
+        <HEADER>
+          <VERSION>1</VERSION>
+          <TALLYREQUEST>Export</TALLYREQUEST>
+          <TYPE>Collection</TYPE>
+          <ID>Group Collection</ID>
+        </HEADER>
+        <BODY>
+          <DESC>
+            <STATICVARIABLES>
+              <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+            </STATICVARIABLES>
+            <TDL>
+              <TDLMESSAGE>
+                <COLLECTION NAME="Group Collection">
+                  <TYPE>Group</TYPE>
+                  <FETCH>GUID, Name, Parent, PrimaryGroup, IsRevenue, IsExpenses</FETCH>
+                </COLLECTION>
+              </TDLMESSAGE>
+            </TDL>
+          </DESC>
+        </BODY>
+      </ENVELOPE>
+    `;
+
+    const result = await queryTally(xmlRequest, { 
+      timeout: 60000,
+      retries: 2,
+      queryType: 'group_sync' 
+    });
+
+    if (!result?.ENVELOPE?.BODY?.DATA?.COLLECTION?.GROUP) {
+      return res.json({
+        success: true,
+        message: 'No groups found in Tally',
+        count: 0
+      });
+    }
+
+    const groups = result.ENVELOPE.BODY.DATA.COLLECTION.GROUP;
+    const groupArray = Array.isArray(groups) ? groups : [groups];
+    console.log(`Found ${groupArray.length} groups in Tally`);
+
+    let syncedCount = 0;
+    let errors = [];
+
+    for (const group of groupArray) {
+      try {
+        const guid = extractValue(group?.GUID) || group?.GUID || '';
+        const name = extractValue(group?.NAME) || group?.NAME || '';
+        const parent = extractValue(group?.PARENT) || group?.PARENT || null;
+        const primaryGroup = extractValue(group?.PRIMARYGROUP) || group?.PRIMARYGROUP || null;
+        const isRevenue = (extractValue(group?.ISREVENUE) || group?.ISREVENUE || 'No') === 'Yes';
+        const isExpense = (extractValue(group?.ISEXPENSES) || group?.ISEXPENSES || 'No') === 'Yes';
+
+        // Check if group exists
+        const existingGroup = await pool.query(
+          'SELECT id FROM groups WHERE guid = $1 AND company_guid = $2',
+          [guid, companyGuid]
+        );
+
+        if (existingGroup.rows.length > 0) {
+          // Update existing group
+          await pool.query(
+            `UPDATE groups SET
+              name = $2,
+              parent = $3,
+              primary_group = $4,
+              is_revenue = $5,
+              is_expense = $6,
+              synced_at = NOW(),
+              updated_at = NOW()
+             WHERE guid = $1 AND company_guid = $7`,
+            [guid, name, parent, primaryGroup, isRevenue, isExpense, companyGuid]
+          );
+        } else {
+          // Insert new group
+          await pool.query(
+            `INSERT INTO groups (guid, name, parent, primary_group, is_revenue, is_expense, company_guid, synced_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())`,
+            [guid, name, parent, primaryGroup, isRevenue, isExpense, companyGuid]
+          );
+        }
+        syncedCount++;
+      } catch (err) {
+        console.error(`Error syncing group:`, err);
+        errors.push({ group: extractValue(group?.NAME) || group?.NAME, error: err.message });
+      }
+    }
+
+    console.log(`✅ Synced ${syncedCount} groups`);
+    res.json({
+      success: true,
+      message: `Successfully synced ${syncedCount} groups from Tally`,
+      count: syncedCount,
+      errors: errors.length > 0 ? errors : undefined
+    });
+  } catch (error) {
+    console.error('❌ Groups sync error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// ==================== LEDGERS SYNC ====================
+
+// Sync ALL Ledgers from Tally (not just vendors/customers)
+app.post('/api/sync/ledgers', async (req, res) => {
+  try {
+    console.log('🔄 Starting ledgers sync from Tally...');
+    const config = loadConfig();
+    const companyGuid = config?.company?.guid;
+
+    if (!companyGuid) {
+      return res.json({
+        success: false,
+        error: 'Company not configured. Please run setup first.'
+      });
+    }
+
+    // Verify Tally company
+    const tallyCompanyInfo = await getCompanyInfo();
+    if (!tallyCompanyInfo || tallyCompanyInfo.guid.toLowerCase() !== companyGuid.toLowerCase()) {
+      return res.json({
+        success: false,
+        error: 'Company mismatch. Please open the correct company in Tally.'
+      });
+    }
+
+    // XML request to fetch ALL ledgers with complete details
+    const xmlRequest = `
+      <ENVELOPE>
+        <HEADER>
+          <VERSION>1</VERSION>
+          <TALLYREQUEST>Export</TALLYREQUEST>
+          <TYPE>Collection</TYPE>
+          <ID>Ledger Collection</ID>
+        </HEADER>
+        <BODY>
+          <DESC>
+            <STATICVARIABLES>
+              <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+            </STATICVARIABLES>
+            <TDL>
+              <TDLMESSAGE>
+                <COLLECTION NAME="Ledger Collection">
+                  <TYPE>Ledger</TYPE>
+                  <FETCH>
+                    GUID, Name, Alias, Parent, 
+                    OpeningBalance, ClosingBalance, 
+                    IsRevenue, IsExpenses,
+                    PAN, GSTIN, StateName, CountryName, Pincode,
+                    MailingAddress, ContactPerson, Phone, Email,
+                    CreditLimit, CreditDays, MaintainBillwise
+                  </FETCH>
+                </COLLECTION>
+              </TDLMESSAGE>
+            </TDL>
+          </DESC>
+        </BODY>
+      </ENVELOPE>
+    `;
+
+    const result = await queryTally(xmlRequest, { 
+      timeout: 60000,
+      retries: 2,
+      queryType: 'ledger_sync' 
+    });
+
+    if (!result?.ENVELOPE?.BODY?.DATA?.COLLECTION?.LEDGER) {
+      return res.json({
+        success: true,
+        message: 'No ledgers found in Tally',
+        count: 0
+      });
+    }
+
+    const ledgers = result.ENVELOPE.BODY.DATA.COLLECTION.LEDGER;
+    const ledgerArray = Array.isArray(ledgers) ? ledgers : [ledgers];
+    console.log(`Found ${ledgerArray.length} ledgers in Tally`);
+
+    let syncedCount = 0;
+    let errors = [];
+
+    // Helper function to derive ledger type from parent group
+    const deriveLedgerType = (parentGroup) => {
+      if (!parentGroup) return null;
+      const parent = parentGroup.toLowerCase();
+      if (parent.includes('sundry debtors')) return 'Customer';
+      if (parent.includes('sundry creditors')) return 'Vendor';
+      if (parent.includes('bank accounts')) return 'Bank';
+      if (parent.includes('cash')) return 'Cash';
+      if (parent.includes('sales')) return 'Income';
+      if (parent.includes('purchase')) return 'Expense';
+      return null;
+    };
+
+    for (const ledger of ledgerArray) {
+      try {
+        const guid = extractValue(ledger?.GUID) || ledger?.GUID || '';
+        const name = extractValue(ledger?.NAME) || ledger?.NAME || '';
+        const alias = extractValue(ledger?.ALIAS) || ledger?.ALIAS || null;
+        const parent = extractValue(ledger?.PARENT) || ledger?.PARENT || '';
+        const openingBalance = parseFloat(extractValue(ledger?.OPENINGBALANCE) || ledger?.OPENINGBALANCE || 0);
+        const closingBalance = parseFloat(extractValue(ledger?.CLOSINGBALANCE) || ledger?.CLOSINGBALANCE || 0);
+        const isRevenue = (extractValue(ledger?.ISREVENUE) || ledger?.ISREVENUE || 'No') === 'Yes';
+        const isExpense = (extractValue(ledger?.ISEXPENSES) || ledger?.ISEXPENSES || 'No') === 'Yes';
+        
+        // Party details
+        const pan = extractValue(ledger?.PAN) || ledger?.PAN || null;
+        const gstin = extractValue(ledger?.GSTIN) || ledger?.GSTIN || null;
+        const state = extractValue(ledger?.STATENAME) || ledger?.STATENAME || null;
+        const country = extractValue(ledger?.COUNTRYNAME) || ledger?.COUNTRYNAME || 'India';
+        const pincode = extractValue(ledger?.PINCODE) || ledger?.PINCODE || null;
+        
+        // Contact details
+        const contactPerson = extractValue(ledger?.CONTACTPERSON) || ledger?.CONTACTPERSON || null;
+        const phone = extractValue(ledger?.PHONE) || ledger?.PHONE || null;
+        const email = extractValue(ledger?.EMAIL) || ledger?.EMAIL || null;
+        
+        // Bill-wise details
+        const maintainBillwise = (extractValue(ledger?.MAINTAINBILLWISE) || ledger?.MAINTAINBILLWISE || 'No') === 'Yes';
+        const creditLimit = parseFloat(extractValue(ledger?.CREDITLIMIT) || ledger?.CREDITLIMIT || 0) || null;
+        const creditDays = parseInt(extractValue(ledger?.CREDITDAYS) || ledger?.CREDITDAYS || 0) || null;
+        
+        // Address details
+        const mailingAddress = ledger?.MAILINGADDRESS;
+        const addressLine1 = mailingAddress?.ADDRESS1?._ || mailingAddress?.ADDRESS1 || null;
+        const addressLine2 = mailingAddress?.ADDRESS2?._ || mailingAddress?.ADDRESS2 || null;
+        const city = mailingAddress?.CITY?._ || mailingAddress?.CITY || null;
+        
+        // Derive ledger type
+        const ledgerType = deriveLedgerType(parent);
+        
+        // Determine balance types
+        const openingBalanceType = openingBalance >= 0 ? 
+          (parent.toLowerCase().includes('sundry debtors') ? 'Dr' : 'Cr') : 
+          (parent.toLowerCase().includes('sundry debtors') ? 'Cr' : 'Dr');
+        const currentBalanceType = closingBalance >= 0 ? 
+          (parent.toLowerCase().includes('sundry debtors') ? 'Dr' : 'Cr') : 
+          (parent.toLowerCase().includes('sundry debtors') ? 'Cr' : 'Dr');
+
+        // Check if ledger exists
+        const existingLedger = await pool.query(
+          'SELECT id FROM ledgers WHERE guid = $1 AND company_guid = $2',
+          [guid, companyGuid]
+        );
+
+        if (existingLedger.rows.length > 0) {
+          // Update existing ledger with all fields
+          await pool.query(
+            `UPDATE ledgers SET
+              name = $2,
+              alias = $3,
+              parent_group = $4,
+              ledger_type = $5,
+              opening_balance = $6,
+              opening_balance_type = $7,
+              closing_balance = $8,
+              current_balance = $8,
+              current_balance_type = $9,
+              is_revenue = $10,
+              is_expense = $11,
+              pan = $12,
+              gstin = $13,
+              state = $14,
+              country = $15,
+              pincode = $16,
+              primary_contact = $17,
+              primary_phone = $18,
+              primary_email = $19,
+              maintain_billwise = $20,
+              credit_limit = $21,
+              credit_days = $22,
+              address_line1 = $23,
+              address_line2 = $24,
+              city = $25,
+              synced_at = NOW(),
+              updated_at = NOW()
+             WHERE guid = $1 AND company_guid = $26`,
+            [guid, name, alias, parent, ledgerType, openingBalance, openingBalanceType, 
+             closingBalance, currentBalanceType, isRevenue, isExpense, pan, gstin, 
+             state, country, pincode, contactPerson, phone, email, maintainBillwise, 
+             creditLimit, creditDays, addressLine1, addressLine2, city, companyGuid]
+          );
+          
+          const ledgerId = existingLedger.rows[0].id;
+          
+          // Create/update default billing address if address data exists
+          if (addressLine1 || state || city) {
+            const existingAddress = await pool.query(
+              'SELECT id FROM addresses WHERE ledger_id = $1 AND address_type = $2',
+              [ledgerId, 'Billing']
+            );
+            
+            if (existingAddress.rows.length > 0) {
+              await pool.query(
+                `UPDATE addresses SET
+                  address_line1 = $1,
+                  address_line2 = $2,
+                  city = $3,
+                  state = $4,
+                  country = $5,
+                  pincode = $6,
+                  gstin = $7,
+                  updated_at = NOW()
+                 WHERE id = $8`,
+                [addressLine1, addressLine2, city, state, country, pincode, gstin, existingAddress.rows[0].id]
+              );
+            } else {
+              await pool.query(
+                `INSERT INTO addresses (address_guid, ledger_id, company_guid, address_type, is_default,
+                 address_line1, address_line2, city, state, country, pincode, gstin)
+                 VALUES (gen_random_uuid()::VARCHAR, $1, $2, 'Billing', TRUE, $3, $4, $5, $6, $7, $8, $9)`,
+                [ledgerId, companyGuid, addressLine1, addressLine2, city, state, country, pincode, gstin]
+              );
+            }
+          }
+        } else {
+          // Insert new ledger with all fields
+          const result = await pool.query(
+            `INSERT INTO ledgers (guid, name, alias, parent_group, ledger_type, opening_balance, opening_balance_type,
+             closing_balance, current_balance, current_balance_type, is_revenue, is_expense, pan, gstin, state, country,
+             pincode, primary_contact, primary_phone, primary_email, maintain_billwise, credit_limit, credit_days,
+             address_line1, address_line2, city, company_guid, synced_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, NOW())
+             RETURNING id`,
+            [guid, name, alias, parent, ledgerType, openingBalance, openingBalanceType, 
+             closingBalance, currentBalanceType, isRevenue, isExpense, pan, gstin, 
+             state, country, pincode, contactPerson, phone, email, maintainBillwise, 
+             creditLimit, creditDays, addressLine1, addressLine2, city, companyGuid]
+          );
+          
+          const ledgerId = result.rows[0].id;
+          
+          // Create default billing address if address data exists
+          if (addressLine1 || state || city) {
+            await pool.query(
+              `INSERT INTO addresses (address_guid, ledger_id, company_guid, address_type, is_default,
+               address_line1, address_line2, city, state, country, pincode, gstin)
+               VALUES (gen_random_uuid()::VARCHAR, $1, $2, 'Billing', TRUE, $3, $4, $5, $6, $7, $8, $9)`,
+              [ledgerId, companyGuid, addressLine1, addressLine2, city, state, country, pincode, gstin]
+            );
+          }
+        }
+        syncedCount++;
+      } catch (err) {
+        console.error(`Error syncing ledger:`, err);
+        errors.push({ ledger: extractValue(ledger?.NAME) || ledger?.NAME, error: err.message });
+      }
+    }
+
+    console.log(`✅ Synced ${syncedCount} ledgers`);
+    res.json({
+      success: true,
+      message: `Successfully synced ${syncedCount} ledgers from Tally`,
+      count: syncedCount,
+      errors: errors.length > 0 ? errors : undefined
+    });
+  } catch (error) {
+    console.error('❌ Ledgers sync error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// ==================== ITEMS SYNC ====================
+
+// Sync Items (Stock Items, Services) from Tally
+app.post('/api/sync/items', async (req, res) => {
+  try {
+    console.log('🔄 Starting items sync from Tally...');
+    const config = loadConfig();
+    const companyGuid = config?.company?.guid;
+
+    if (!companyGuid) {
+      return res.json({
+        success: false,
+        error: 'Company not configured. Please run setup first.'
+      });
+    }
+
+    // Verify Tally company
+    const tallyCompanyInfo = await getCompanyInfo();
+    if (!tallyCompanyInfo || tallyCompanyInfo.guid.toLowerCase() !== companyGuid.toLowerCase()) {
+      return res.json({
+        success: false,
+        error: 'Company mismatch. Please open the correct company in Tally.'
+      });
+    }
+
+    // XML request to fetch all stock items
+    const xmlRequest = `
+      <ENVELOPE>
+        <HEADER>
+          <VERSION>1</VERSION>
+          <TALLYREQUEST>Export</TALLYREQUEST>
+          <TYPE>Collection</TYPE>
+          <ID>Stock Item Collection</ID>
+        </HEADER>
+        <BODY>
+          <DESC>
+            <STATICVARIABLES>
+              <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+            </STATICVARIABLES>
+            <TDL>
+              <TDLMESSAGE>
+                <COLLECTION NAME="Stock Item Collection">
+                  <TYPE>StockItem</TYPE>
+                  <FETCH>
+                    GUID, Name, Alias, BaseUnits, 
+                    OpeningBalance, OpeningValue,
+                    HSNCode, GSTRate, Category,
+                    Rate, CostPrice, MRP, Description
+                  </FETCH>
+                </COLLECTION>
+              </TDLMESSAGE>
+            </TDL>
+          </DESC>
+        </BODY>
+      </ENVELOPE>
+    `;
+
+    const result = await queryTally(xmlRequest, { 
+      timeout: 60000,
+      retries: 2,
+      queryType: 'item_sync' 
+    });
+
+    if (!result?.ENVELOPE?.BODY?.DATA?.COLLECTION?.STOCKITEM) {
+      return res.json({
+        success: true,
+        message: 'No items found in Tally',
+        count: 0
+      });
+    }
+
+    const items = result.ENVELOPE.BODY.DATA.COLLECTION.STOCKITEM;
+    const itemArray = Array.isArray(items) ? items : [items];
+    console.log(`Found ${itemArray.length} items in Tally`);
+
+    let syncedCount = 0;
+    let errors = [];
+
+    for (const item of itemArray) {
+      try {
+        const guid = extractValue(item?.GUID) || item?.GUID || '';
+        const name = extractValue(item?.NAME) || item?.NAME || '';
+        const alias = extractValue(item?.ALIAS) || item?.ALIAS || null;
+        const baseUnit = extractValue(item?.BASEUNITS) || item?.BASEUNITS || null;
+        const openingQty = parseFloat(extractValue(item?.OPENINGBALANCE) || item?.OPENINGBALANCE || 0);
+        const openingValue = parseFloat(extractValue(item?.OPENINGVALUE) || item?.OPENINGVALUE || 0);
+        const hsnCode = extractValue(item?.HSNCODE) || item?.HSNCODE || null;
+        const gstRate = parseFloat(extractValue(item?.GSTRATE) || item?.GSTRATE || 0) || null;
+        const category = extractValue(item?.CATEGORY) || item?.CATEGORY || null;
+        const rate = parseFloat(extractValue(item?.RATE) || item?.RATE || 0) || null;
+        const costPrice = parseFloat(extractValue(item?.COSTPRICE) || item?.COSTPRICE || 0) || null;
+        const mrp = parseFloat(extractValue(item?.MRP) || item?.MRP || 0) || null;
+        const description = extractValue(item?.DESCRIPTION) || item?.DESCRIPTION || null;
+
+        // Check if item exists
+        const existingItem = await pool.query(
+          'SELECT id FROM items WHERE item_guid = $1 AND company_guid = $2',
+          [guid, companyGuid]
+        );
+
+        if (existingItem.rows.length > 0) {
+          // Update existing item
+          await pool.query(
+            `UPDATE items SET
+              name = $2,
+              alias = $3,
+              base_unit = $4,
+              opening_quantity = $5,
+              opening_value = $6,
+              hsn_code = $7,
+              gst_rate = $8,
+              category = $9,
+              rate = $10,
+              cost_price = $11,
+              mrp = $12,
+              description = $13,
+              synced_at = NOW(),
+              updated_at = NOW()
+             WHERE item_guid = $1 AND company_guid = $14`,
+            [guid, name, alias, baseUnit, openingQty, openingValue, hsnCode, gstRate, 
+             category, rate, costPrice, mrp, description, companyGuid]
+          );
+        } else {
+          // Insert new item
+          await pool.query(
+            `INSERT INTO items (item_guid, company_guid, name, alias, base_unit, opening_quantity, opening_value,
+             hsn_code, gst_rate, category, rate, cost_price, mrp, description, synced_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, NOW())`,
+            [guid, companyGuid, name, alias, baseUnit, openingQty, openingValue, hsnCode, 
+             gstRate, category, rate, costPrice, mrp, description]
+          );
+        }
+        syncedCount++;
+      } catch (err) {
+        console.error(`Error syncing item:`, err);
+        errors.push({ item: extractValue(item?.NAME) || item?.NAME, error: err.message });
+      }
+    }
+
+    console.log(`✅ Synced ${syncedCount} items`);
+    res.json({
+      success: true,
+      message: `Successfully synced ${syncedCount} items from Tally`,
+      count: syncedCount,
+      errors: errors.length > 0 ? errors : undefined
+    });
+  } catch (error) {
+    console.error('❌ Items sync error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// ==================== VOUCHERS COMPLETE SYNC ====================
+
+// Sync Complete Vouchers with all details (vouchers + voucher_line_items + addresses)
+// This replaces the old transaction sync with proper normalized structure
+app.post('/api/sync/vouchers-complete', async (req, res) => {
+  try {
+    console.log('🔄 Starting complete vouchers sync from Tally...');
+    const config = loadConfig();
+    const companyGuid = config?.company?.guid;
+
+    if (!companyGuid) {
+      return res.json({
+        success: false,
+        error: 'Company not configured. Please run setup first.'
+      });
+    }
+
+    // Verify Tally company
+    const tallyCompanyInfo = await getCompanyInfo();
+    if (!tallyCompanyInfo || tallyCompanyInfo.guid.toLowerCase() !== companyGuid.toLowerCase()) {
+      return res.json({
+        success: false,
+        error: 'Company mismatch. Please open the correct company in Tally.'
+      });
+    }
+
+    // Date range
+    const { startDate, endDate } = req.body;
+    const fromDate = startDate || new Date(Date.now() - 365 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+    const toDate = endDate || new Date().toISOString().split('T')[0];
+    
+    const fromDateTally = formatTallyDate(fromDate, 'tally');
+    const toDateTally = formatTallyDate(toDate, 'tally');
+
+    console.log(`📅 Syncing vouchers from ${fromDateTally} to ${toDateTally}`);
+
+    // XML request to fetch ALL voucher types with complete data (ALL 53 COLUMNS)
+    const xmlRequest = `
+      <ENVELOPE>
+        <HEADER>
+          <VERSION>1</VERSION>
+          <TALLYREQUEST>Export</TALLYREQUEST>
+          <TYPE>Collection</TYPE>
+          <ID>Voucher Collection</ID>
+        </HEADER>
+        <BODY>
+          <DESC>
+            <STATICVARIABLES>
+              <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+              <SVFROMDATE>${fromDateTally}</SVFROMDATE>
+              <SVTODATE>${toDateTally}</SVTODATE>
+            </STATICVARIABLES>
+            <TDL>
+              <TDLMESSAGE>
+                <COLLECTION NAME="Voucher Collection">
+                  <TYPE>Voucher</TYPE>
+                  <FETCH>
+                    GUID, VoucherNumber, VoucherTypeName, Date, 
+                    PartyLedgerName, Amount, Narration,
+                    Reference, ReferenceDate,
+                    PersistentView,
+                    EffectiveDate,
+                    IsCancelled, IsOptional,
+                    BuyerOrderNumber, OrderDate,
+                    BuyerName, BuyerMailingName, BuyerAddress,
+                    BuyerStateName, BuyerPincode, BuyerGSTIN,
+                    ConsigneeName, ConsigneeMailingName, ConsigneeAddress,
+                    ConsigneeStateName, ConsigneePincode, ConsigneeGSTIN,
+                    DispatchDocNo, DispatchDate, DispatchedThrough,
+                    Destination, CarrierName, BillOfLading, MotorVehicleNo,
+                    PlaceOfReceipt, VesselFlightNo, PortOfLoading, PortOfDischarge,
+                    CountryOfFinalDestination, ShippingBillNo, BillOfEntry, PortCode,
+                    DateOfExport, ModeOfPayment, PaymentTerms, DueDate,
+                    OtherReferences, TermsOfDelivery,
+                    ALLLEDGERENTRIES.LIST:LEDGERNAME,
+                    ALLLEDGERENTRIES.LIST:ISDEEMEDPOSITIVE,
+                    ALLLEDGERENTRIES.LIST:LEDGERFROMITEM,
+                    ALLLEDGERENTRIES.LIST:AMOUNT,
+                    ALLLEDGERENTRIES.LIST:BILLALLOCATIONS.LIST:NAME,
+                    ALLLEDGERENTRIES.LIST:BILLALLOCATIONS.LIST:BILLTYPE,
+                    ALLLEDGERENTRIES.LIST:BILLALLOCATIONS.LIST:AMOUNT,
+                    ALLINVENTORYENTRIES.LIST:STOCKITEMNAME,
+                    ALLINVENTORYENTRIES.LIST:ACTUALQTY,
+                    ALLINVENTORYENTRIES.LIST:BILLEDQTY,
+                    ALLINVENTORYENTRIES.LIST:RATE,
+                    ALLINVENTORYENTRIES.LIST:AMOUNT,
+                    ALLINVENTORYENTRIES.LIST:DISCOUNT,
+                    ALLINVENTORYENTRIES.LIST:BATCHALLOCATIONS.LIST:BATCHNAME,
+                    ALLINVENTORYENTRIES.LIST:ACCOUNTINGALLOCATIONS.LIST:LEDGERNAME,
+                    ALLINVENTORYENTRIES.LIST:ACCOUNTINGALLOCATIONS.LIST:GSTRATE,
+                    ALLINVENTORYENTRIES.LIST:ACCOUNTINGALLOCATIONS.LIST:AMOUNT
+                  </FETCH>
+                </COLLECTION>
+              </TDLMESSAGE>
+            </TDL>
+          </DESC>
+        </BODY>
+      </ENVELOPE>
+    `;
+
+    const result = await queryTally(xmlRequest, { 
+      timeout: 120000, // 2 minutes for large datasets
+      retries: 2,
+      queryType: 'voucher_complete_sync' 
+    });
+
+    if (!result?.ENVELOPE?.BODY?.DATA?.COLLECTION?.VOUCHER) {
+      return res.json({
+        success: true,
+        message: 'No vouchers found in Tally for the date range',
+        count: 0
+      });
+    }
+
+    const vouchers = result.ENVELOPE.BODY.DATA.COLLECTION.VOUCHER;
+    const voucherArray = Array.isArray(vouchers) ? vouchers : [vouchers];
+    console.log(`Found ${voucherArray.length} vouchers in Tally`);
+
+    let vouchersSynced = 0;
+    let lineItemsSynced = 0;
+    let syncedAddresses = 0;
+    let errors = [];
+
+
+    for (const voucher of voucherArray) {
+      try {
+        // Basic voucher info
+        const voucherGuid = extractValue(voucher?.GUID) || voucher?.GUID || '';
+        const voucherNumber = extractValue(voucher?.VOUCHERNUMBER) || voucher?.VOUCHERNUMBER || '';
+        const voucherType = extractValue(voucher?.VOUCHERTYPENAME) || voucher?.VOUCHERTYPENAME || 'Unknown';
+        const date = parseDate(extractValue(voucher?.DATE) || voucher?.DATE);
+        const effectiveDate = parseDate(extractValue(voucher?.EFFECTIVEDATE) || voucher?.EFFECTIVEDATE);
+        
+        const partyName = extractValue(voucher?.PARTYLEDGERNAME) || voucher?.PARTYLEDGERNAME || null;
+        const amount = Math.abs(parseFloat(extractValue(voucher?.AMOUNT) || voucher?.AMOUNT || 0));
+        const narration = extractValue(voucher?.NARRATION) || voucher?.NARRATION || null;
+        const isCancelled = (extractValue(voucher?.ISCANCELLED) || voucher?.ISCANCELLED || 'No') === 'Yes';
+        
+        // Reference details
+        const referenceNumber = extractValue(voucher?.REFERENCE) || voucher?.REFERENCE || null;
+        const referenceDate = parseDate(extractValue(voucher?.REFERENCEDATE) || voucher?.REFERENCEDATE);
+        
+        // Order details
+        const orderNumber = extractValue(voucher?.BUYERORDERNUMBER) || voucher?.BUYERORDERNUMBER || null;
+        const orderDate = parseDate(extractValue(voucher?.ORDERDATE) || voucher?.ORDERDATE);
+
+        // Get/create party ledger_id
+        let partyLedgerId = null;
+        if (partyName) {
+          partyLedgerId = await getLedgerIdByName(partyName, companyGuid);
+        }
+        
+        // Get/create buyer address
+        let billingAddressId = null;
+        if (voucher.BUYERNAME || voucher.BUYERADDRESS) {
+          billingAddressId = await getOrCreateAddress({
+            companyGuid: companyGuid,
+            partyName: partyName,
+            ledgerId: partyLedgerId,
+            addressType: 'Billing',
+            name: extractValue(voucher.BUYERNAME) || null,
+            mailingName: extractValue(voucher.BUYERMAILINGNAME) || null,
+            address: extractValue(voucher.BUYERADDRESS) || null,
+            state: extractValue(voucher.BUYERSTATENAME) || null,
+            pincode: extractValue(voucher.BUYERPINCODE) || null,
+            gstin: extractValue(voucher.BUYERGSTIN) || null
+          });
+          
+          if (billingAddressId) syncedAddresses++;
+        }
+        
+        // Get/create consignee address
+        let shippingAddressId = null;
+        if (voucher.CONSIGNEENAME || voucher.CONSIGNEEADDRESS) {
+          shippingAddressId = await getOrCreateAddress({
+            companyGuid: companyGuid,
+            partyName: partyName,
+            ledgerId: partyLedgerId,
+            addressType: 'Shipping',
+            name: extractValue(voucher.CONSIGNEENAME) || null,
+            mailingName: extractValue(voucher.CONSIGNEEMAILINGNAME) || null,
+            address: extractValue(voucher.CONSIGNEEADDRESS) || null,
+            state: extractValue(voucher.CONSIGNEESTATENAME) || null,
+            pincode: extractValue(voucher.CONSIGNEEPINCODE) || null,
+            gstin: extractValue(voucher.CONSIGNEEGSTIN) || null
+          });
+          
+          if (shippingAddressId) syncedAddresses++;
+        }
+        
+        // Dispatch details
+        const dispatchDocNo = extractValue(voucher.DISPATCHDOCNO) || null;
+        const dispatchDate = parseDate(extractValue(voucher.DISPATCHDATE) || voucher.DISPATCHDATE);
+        const dispatchedThrough = extractValue(voucher.DISPATCHEDTHROUGH) || null;
+        const destination = extractValue(voucher.DESTINATION) || null;
+        const carrierName = extractValue(voucher.CARRIERNAME) || null;
+        const billOfLading = extractValue(voucher.BILLOFLADING) || null;
+        const motorVehicleNo = extractValue(voucher.MOTORVEHICLENO) || null;
+        
+        // Port/shipping details (for exports)
+        const placeOfReceipt = extractValue(voucher.PLACEOFRECEIPT) || null;
+        const vesselFlightNo = extractValue(voucher.VESSELFLIGHTNO) || null;
+        const portOfLoading = extractValue(voucher.PORTOFLOADING) || null;
+        const portOfDischarge = extractValue(voucher.PORTOFDISCHARGE) || null;
+        const countryTo = extractValue(voucher.COUNTRYOFFINALDESTINATION) || null;
+        const shippingBillNo = extractValue(voucher.SHIPPINGBILLNO) || null;
+        const billOfEntry = extractValue(voucher.BILLOFENTRY) || null;
+        const portCode = extractValue(voucher.PORTCODE) || null;
+        const dateOfExport = parseDate(extractValue(voucher.DATEOFEXPORT) || voucher.DATEOFEXPORT);
+        
+        // Payment details
+        const modeOfPayment = extractValue(voucher.MODEOFPAYMENT) || null;
+        const paymentTerms = extractValue(voucher.PAYMENTTERMS) || null;
+        const dueDate = parseDate(extractValue(voucher.DUEDATE) || voucher.DUEDATE);
+        const otherReferences = extractValue(voucher.OTHERREFERENCES) || null;
+        const termsOfDelivery = extractValue(voucher.TERMSOFDELIVERY) || null;
+
+        // Check if voucher exists
+        const existingVoucher = await pool.query(
+          'SELECT id FROM vouchers WHERE voucher_guid = $1 AND company_guid = $2',
+          [voucherGuid, companyGuid]
+        );
+
+        let voucherId;
+
+        if (existingVoucher.rows.length > 0) {
+          // Update existing voucher
+          voucherId = existingVoucher.rows[0].id;
+          
+          await pool.query(
+            `UPDATE vouchers SET
+              voucher_number = $2, voucher_type = $3, date = $4,
+              party_ledger_id = $5, party_name = $6,
+              total_amount = $7, narration = $8,
+              reference_number = $9, reference_date = $10,
+              billing_address_id = $11, shipping_address_id = $12,
+              order_number = $13, order_date = $14,
+              dispatch_doc_no = $15, dispatch_date = $16,
+              dispatched_through = $17, destination = $18,
+              carrier_name = $19, bill_of_lading = $20,
+              motor_vehicle_no = $21,
+              place_of_receipt = $22, vessel_flight_no = $23,
+              port_of_loading = $24, port_of_discharge = $25,
+              country_to = $26, shipping_bill_no = $27,
+              bill_of_entry = $28, port_code = $29,
+              date_of_export = $30,
+              mode_of_payment = $31, payment_terms = $32,
+              due_date = $33, other_references = $34,
+              terms_of_delivery = $35,
+              is_cancelled = $36,
+              synced_at = NOW(), updated_at = NOW()
+             WHERE voucher_guid = $1 AND company_guid = $37`,
+            [
+              voucherGuid, voucherNumber, voucherType, date,
+              partyLedgerId, partyName,
+              amount, narration,
+              referenceNumber, referenceDate,
+              billingAddressId, shippingAddressId,
+              orderNumber, orderDate,
+              dispatchDocNo, dispatchDate, dispatchedThrough, destination,
+              carrierName, billOfLading, motorVehicleNo,
+              placeOfReceipt, vesselFlightNo, portOfLoading, portOfDischarge,
+              countryTo, shippingBillNo, billOfEntry, portCode, dateOfExport,
+              modeOfPayment, paymentTerms, dueDate, otherReferences, termsOfDelivery,
+              isCancelled,
+              companyGuid
+            ]
+          );
+          
+          // Delete old line items
+          await pool.query('DELETE FROM voucher_line_items WHERE voucher_id = $1', [voucherId]);
+          
+        } else {
+          // Insert new voucher
+          const insertResult = await pool.query(
+            `INSERT INTO vouchers (
+              voucher_guid, company_guid,
+              voucher_number, voucher_type, date,
+              party_ledger_id, party_name,
+              total_amount, narration,
+              reference_number, reference_date,
+              billing_address_id, shipping_address_id,
+              order_number, order_date,
+              dispatch_doc_no, dispatch_date, dispatched_through, destination,
+              carrier_name, bill_of_lading, motor_vehicle_no,
+              place_of_receipt, vessel_flight_no,
+              port_of_loading, port_of_discharge,
+              country_to, shipping_bill_no, bill_of_entry, port_code, date_of_export,
+              mode_of_payment, payment_terms, due_date, other_references, terms_of_delivery,
+              is_cancelled,
+              synced_at
+            )
+            VALUES (
+              $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
+              $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28,
+              $29, $30, $31, $32, $33, $34, $35, $36, $37, NOW()
+            )
+            RETURNING id`,
+            [
+              voucherGuid, companyGuid,
+              voucherNumber, voucherType, date,
+              partyLedgerId, partyName,
+              amount, narration,
+              referenceNumber, referenceDate,
+              billingAddressId, shippingAddressId,
+              orderNumber, orderDate,
+              dispatchDocNo, dispatchDate, dispatchedThrough, destination,
+              carrierName, billOfLading, motorVehicleNo,
+              placeOfReceipt, vesselFlightNo, portOfLoading, portOfDischarge,
+              countryTo, shippingBillNo, billOfEntry, portCode, dateOfExport,
+              modeOfPayment, paymentTerms, dueDate, otherReferences, termsOfDelivery,
+              isCancelled
+            ]
+          );
+          
+          voucherId = insertResult.rows[0].id;
+        }
+
+        vouchersSynced++;
+        
+        // Now insert line items (double-entry)
+        let lineNumber = 1;
+        
+        // Process ledger entries
+        const ledgerEntries = voucher['ALLLEDGERENTRIES.LIST'] || voucher.ALLLEDGERENTRIES?.LIST;
+        const ledgerArray = Array.isArray(ledgerEntries) ? ledgerEntries : (ledgerEntries ? [ledgerEntries] : []);
+        
+        for (const entry of ledgerArray) {
+          const ledgerName = extractValue(entry?.LEDGERNAME) || entry?.LEDGERNAME;
+          const entryAmount = parseFloat(extractValue(entry?.AMOUNT) || entry?.AMOUNT || 0);
+          const isDeemedPositive = (extractValue(entry?.ISDEEMEDPOSITIVE) || entry?.ISDEEMEDPOSITIVE || 'No') === 'Yes';
+          const isFromItem = (extractValue(entry?.LEDGERFROMITEM) || entry?.LEDGERFROMITEM || 'No') === 'Yes';
+          
+          // Debit = positive deemed positive OR negative not deemed positive
+          // Credit = negative deemed positive OR positive not deemed positive
+          const debitAmount = (isDeemedPositive && entryAmount >= 0) || (!isDeemedPositive && entryAmount < 0) 
+            ? Math.abs(entryAmount) : 0;
+          const creditAmount = (!isDeemedPositive && entryAmount >= 0) || (isDeemedPositive && entryAmount < 0) 
+            ? Math.abs(entryAmount) : 0;
+          
+          const entryLedgerId = await getLedgerIdByName(ledgerName, companyGuid);
+          
+          // Get bill allocations (for payments/receipts)
+          const billAllocations = entry['BILLALLOCATIONS.LIST'] || entry.BILLALLOCATIONS?.LIST;
+          const billArray = Array.isArray(billAllocations) ? billAllocations : (billAllocations ? [billAllocations] : []);
+          
+          if (billArray.length > 0) {
+            // Create line items for each bill allocation
+            for (const bill of billArray) {
+              const billName = extractValue(bill?.NAME) || null;
+              const billType = extractValue(bill?.BILLTYPE) || null;
+              const billAmount = parseFloat(extractValue(bill?.AMOUNT) || 0);
+              
+              await pool.query(
+                `INSERT INTO voucher_line_items (
+                  line_guid, voucher_id, company_guid, line_number,
+                  ledger_id, ledger_name,
+                  debit_amount, credit_amount,
+                  reference_type, reference_name, reference_amount
+                )
+                VALUES (gen_random_uuid()::VARCHAR, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+                [
+                  voucherId, companyGuid, lineNumber++,
+                  entryLedgerId, ledgerName,
+                  debitAmount, creditAmount,
+                  billType, billName, Math.abs(billAmount)
+                ]
+              );
+              
+              lineItemsSynced++;
+            }
+          } else {
+            // Regular ledger entry
+            await pool.query(
+              `INSERT INTO voucher_line_items (
+                line_guid, voucher_id, company_guid, line_number,
+                ledger_id, ledger_name,
+                debit_amount, credit_amount
+              )
+              VALUES (gen_random_uuid()::VARCHAR, $1, $2, $3, $4, $5, $6, $7)`,
+              [
+                voucherId, companyGuid, lineNumber++,
+                entryLedgerId, ledgerName,
+                debitAmount, creditAmount
+              ]
+            );
+            
+            lineItemsSynced++;
+          }
+        }
+        
+        // Process inventory entries (items)
+        const inventoryEntries = voucher['ALLINVENTORYENTRIES.LIST'] || voucher.ALLINVENTORYENTRIES?.LIST;
+        const inventoryArray = Array.isArray(inventoryEntries) ? inventoryEntries : (inventoryEntries ? [inventoryEntries] : []);
+        
+        for (const invEntry of inventoryArray) {
+          const itemName = extractValue(invEntry?.STOCKITEMNAME) || invEntry?.STOCKITEMNAME;
+          const actualQty = parseFloat(extractValue(invEntry?.ACTUALQTY) || invEntry?.ACTUALQTY || 0);
+          const billedQty = parseFloat(extractValue(invEntry?.BILLEDQTY) || invEntry?.BILLEDQTY || 0);
+          const rate = parseFloat(extractValue(invEntry?.RATE) || invEntry?.RATE || 0);
+          const itemAmount = parseFloat(extractValue(invEntry?.AMOUNT) || invEntry?.AMOUNT || 0);
+          const discount = parseFloat(extractValue(invEntry?.DISCOUNT) || invEntry?.DISCOUNT || 0);
+          
+          const itemId = await getItemIdByName(itemName, companyGuid);
+          
+          // Get accounting allocations (GST breakdown)
+          const accountingAllocations = invEntry['ACCOUNTINGALLOCATIONS.LIST'] || invEntry.ACCOUNTINGALLOCATIONS?.LIST;
+          const accountingArray = Array.isArray(accountingAllocations) ? accountingAllocations : (accountingAllocations ? [accountingAllocations] : []);
+          
+          // Process each accounting allocation (CGST, SGST, IGST)
+          for (const accEntry of accountingArray) {
+            const accLedgerName = extractValue(accEntry?.LEDGERNAME) || accEntry?.LEDGERNAME;
+            const gstRate = parseFloat(extractValue(accEntry?.GSTRATE) || 0);
+            const accAmount = Math.abs(parseFloat(extractValue(accEntry?.AMOUNT) || accEntry?.AMOUNT || 0));
+            
+            const accLedgerId = await getLedgerIdByName(accLedgerName, companyGuid);
+            
+            // Determine GST type
+            let cgstAmount = 0, sgstAmount = 0, igstAmount = 0;
+            if (accLedgerName && accLedgerName.toLowerCase().includes('cgst')) {
+              cgstAmount = accAmount;
+            } else if (accLedgerName && accLedgerName.toLowerCase().includes('sgst')) {
+              sgstAmount = accAmount;
+            } else if (accLedgerName && accLedgerName.toLowerCase().includes('igst')) {
+              igstAmount = accAmount;
+            }
+            
+            await pool.query(
+              `INSERT INTO voucher_line_items (
+                line_guid, voucher_id, company_guid, line_number,
+                ledger_id, ledger_name,
+                item_id, item_name,
+                actual_quantity, billed_quantity, rate, amount,
+                discount_amount,
+                cgst_amount, sgst_amount, igst_amount,
+                debit_amount, credit_amount
+              )
+              VALUES (gen_random_uuid()::VARCHAR, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)`,
+              [
+                voucherId, companyGuid, lineNumber++,
+                accLedgerId, accLedgerName,
+                itemId, itemName,
+                actualQty, billedQty, rate, Math.abs(itemAmount),
+                discount,
+                cgstAmount, sgstAmount, igstAmount,
+                0, accAmount // Credit for tax
+              ]
+            );
+            
+            lineItemsSynced++;
+          }
+        }
+        
+        // Progress logging
+        if (vouchersSynced % 100 === 0) {
+          console.log(`  Progress: ${vouchersSynced} vouchers synced...`);
+        }
+      } catch (err) {
+        console.error(`Error syncing voucher:`, err);
+        errors.push({ voucher: extractValue(voucher?.VOUCHERNUMBER) || voucher?.VOUCHERNUMBER, error: err.message });
+      }
+    }
+
+    console.log(`✅ Synced ${vouchersSynced} vouchers`);
+    console.log(`✅ Created ${lineItemsSynced} line items`);
+    console.log(`✅ Created ${syncedAddresses} addresses`);
+
+    res.json({
+      success: true,
+      message: `Successfully synced ${vouchersSynced} vouchers from Tally`,
+      vouchersSynced: vouchersSynced,
+      lineItemsSynced: lineItemsSynced,
+      addressesCreated: syncedAddresses,
+      errors: errors.length > 0 ? errors.slice(0, 10) : undefined
+    });
+
+    // Invalidate cache
+    if (companyGuid) {
+      cache.deletePattern(`*${companyGuid}*`);
+    }
+  } catch (error) {
+    console.error('❌ Vouchers complete sync error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// =====================================================
+// HELPER FUNCTIONS FOR VOUCHERS SYNC
+// =====================================================
+
+async function getLedgerIdByName(ledgerName, companyGuid) {
+  if (!ledgerName) return null;
+  
+  try {
+    const result = await pool.query(
+      'SELECT id FROM ledgers WHERE name = $1 AND company_guid = $2 LIMIT 1',
+      [ledgerName, companyGuid]
+    );
+    
+    return result.rows.length > 0 ? result.rows[0].id : null;
+  } catch (error) {
+    console.error('Error getting ledger ID:', error);
+    return null;
+  }
+}
+
+async function getItemIdByName(itemName, companyGuid) {
+  if (!itemName) return null;
+  
+  try {
+    const result = await pool.query(
+      'SELECT id FROM items WHERE name = $1 AND company_guid = $2 LIMIT 1',
+      [itemName, companyGuid]
+    );
+    
+    return result.rows.length > 0 ? result.rows[0].id : null;
+  } catch (error) {
+    console.error('Error getting item ID:', error);
+    return null;
+  }
+}
+
+async function getOrCreateAddress(addressData) {
+  const {
+    companyGuid, partyName, ledgerId, addressType,
+    name, mailingName, address, state, pincode, gstin
+  } = addressData;
+  
+  if (!address && !state) return null;
+  if (!ledgerId) return null;
+  
+  try {
+    // Check if this exact address already exists
+    const existing = await pool.query(
+      `SELECT id FROM addresses 
+       WHERE ledger_id = $1 
+       AND address_type = $2 
+       AND COALESCE(address_line1, '') = COALESCE($3, '')
+       AND COALESCE(state, '') = COALESCE($4, '')
+       LIMIT 1`,
+      [ledgerId, addressType, address, state]
+    );
+    
+    if (existing.rows.length > 0) {
+      return existing.rows[0].id;
+    }
+    
+    // Create new address
+    const result = await pool.query(
+      `INSERT INTO addresses (
+        address_guid, ledger_id, company_guid,
+        address_type, address_name,
+        address_line1, state, pincode, gstin,
+        is_default
+      )
+      VALUES (gen_random_uuid()::VARCHAR, $1, $2, $3, $4, $5, $6, $7, $8, FALSE)
+      RETURNING id`,
+      [
+        ledgerId, companyGuid, addressType,
+        mailingName || name || partyName,
+        address, state, pincode, gstin
+      ]
+    );
+    
+    return result.rows[0].id;
+    
+  } catch (error) {
+    console.error('Error creating address:', error);
+    return null;
+  }
+}
+
+function parseDate(dateStr) {
+  if (!dateStr) return null;
+  
+  try {
+    // Tally dates come as YYYYMMDD
+    if (typeof dateStr === 'string' && dateStr.length === 8) {
+      const year = dateStr.substring(0, 4);
+      const month = dateStr.substring(4, 6);
+      const day = dateStr.substring(6, 8);
+      return `${year}-${month}-${day}`;
+    }
+    
+    return dateStr;
+  } catch (error) {
+    return null;
+  }
+}
+
+// ==================== MASTER SYNC ORCHESTRATION ====================
+
+// Master sync endpoint that runs all syncs in sequence
+app.post('/api/sync/all-complete', async (req, res) => {
+  try {
+    console.log('🚀 Starting COMPLETE full sync...');
+    
+    const config = loadConfig();
+    const companyGuid = config?.company?.guid;
+    
+    if (!companyGuid) {
+      return res.json({
+        success: false,
+        error: 'Company not configured'
+      });
+    }
+
+    const syncId = Date.now().toString();
+    const results = {
+      syncId: syncId,
+      startTime: new Date().toISOString(),
+      steps: []
+    };
+
+    try {
+      const baseUrl = `http://localhost:${process.env.PORT || 3000}`;
+      
+      // Step 1: Groups
+      console.log('📦 Step 1/5: Syncing groups...');
+      const groupsResp = await axios.post(`${baseUrl}/api/sync/groups`);
+      const groupsResult = groupsResp.data;
+      results.steps.push({ step: 'groups', ...groupsResult });
+      console.log(`✅ Synced ${groupsResult.count} groups`);
+
+      // Step 2: Ledgers (complete)
+      console.log('📦 Step 2/5: Syncing ledgers (complete)...');
+      const ledgersResp = await axios.post(`${baseUrl}/api/sync/ledgers`);
+      const ledgersResult = ledgersResp.data;
+      results.steps.push({ step: 'ledgers', ...ledgersResult });
+      console.log(`✅ Synced ${ledgersResult.count} ledgers`);
+
+      // Step 3: Items
+      console.log('📦 Step 3/5: Syncing items...');
+      const itemsResp = await axios.post(`${baseUrl}/api/sync/items`);
+      const itemsResult = itemsResp.data;
+      results.steps.push({ step: 'items', ...itemsResult });
+      console.log(`✅ Synced ${itemsResult.count} items`);
+
+      // Step 4: Vouchers (complete)
+      console.log('📦 Step 4/5: Syncing vouchers (complete)...');
+      const vouchersResp = await axios.post(`${baseUrl}/api/sync/vouchers-complete`, {
+        startDate: req.body.startDate,
+        endDate: req.body.endDate
+      });
+      const vouchersResult = vouchersResp.data;
+      results.steps.push({ step: 'vouchers', ...vouchersResult });
+      console.log(`✅ Synced ${vouchersResult.vouchersSynced || vouchersResult.vouchers || 0} vouchers`);
+
+      // Step 5: Recalculate ledger balances
+      console.log('📦 Step 5/5: Recalculating ledger balances...');
+      await recalculateLedgerBalances(companyGuid);
+      results.steps.push({ step: 'recalculate', success: true });
+      console.log(`✅ Balances recalculated`);
+
+      results.endTime = new Date().toISOString();
+      results.success = true;
+      results.message = 'Complete sync finished successfully!';
+
+      console.log('🎉 COMPLETE SYNC FINISHED!');
+
+      res.json(results);
+
+    } catch (error) {
+      results.endTime = new Date().toISOString();
+      results.success = false;
+      results.error = error.message;
+      
+      console.error('❌ Sync failed:', error);
+      res.status(500).json(results);
+    }
+
+  } catch (error) {
+    console.error('❌ Master sync error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Helper function to recalculate ledger balances from line items
+async function recalculateLedgerBalances(companyGuid) {
+  try {
+    await pool.query(`
+      UPDATE ledgers l
+      SET current_balance = COALESCE((
+        SELECT SUM(li.debit_amount - li.credit_amount)
+        FROM voucher_line_items li
+        JOIN vouchers v ON li.voucher_id = v.id
+        WHERE li.ledger_id = l.id
+        AND v.is_cancelled = FALSE
+      ), 0) + l.opening_balance,
+      current_balance_type = CASE 
+        WHEN (COALESCE((
+          SELECT SUM(li.debit_amount - li.credit_amount)
+          FROM voucher_line_items li
+          JOIN vouchers v ON li.voucher_id = v.id
+          WHERE li.ledger_id = l.id
+          AND v.is_cancelled = FALSE
+        ), 0) + l.opening_balance) >= 0 
+        THEN l.opening_balance_type
+        ELSE CASE WHEN l.opening_balance_type = 'Dr' THEN 'Cr' ELSE 'Dr' END
+      END
+      WHERE l.company_guid = $1
+    `, [companyGuid]);
+    
+    console.log('✅ Ledger balances recalculated');
+  } catch (error) {
+    console.error('Error recalculating balances:', error);
+  }
+}
+
+// ==================== SALES GROUP SUMMARY ====================
+
+// Get Sales Accounts Summary (CORRECT METHOD - Uses Group-Ledger Hierarchy)
+app.get('/api/sales/group-summary', async (req, res) => {
+  try {
+    const config = loadConfig();
+    const companyGuid = config?.company?.guid;
+
+    if (!companyGuid) {
+      return res.json({
+        success: false,
+        error: 'Company not configured. Please run setup first.'
+      });
+    }
+
+    // Get date range from query params or use default (last 7 months)
+    const { fromDate, toDate } = req.query;
+    let fromDateObj, toDateObj;
+
+    if (!fromDate || !toDate) {
+      // Default to last 7 months (similar to Tally screenshot: Apr to Nov)
+      const today = new Date();
+      toDateObj = new Date(today);
+      fromDateObj = new Date(today);
+      fromDateObj.setMonth(fromDateObj.getMonth() - 7);
+    } else {
+      fromDateObj = new Date(fromDate);
+      toDateObj = new Date(toDate);
+    }
+
+    // Format dates for database query (YYYY-MM-DD)
+    const fromDateStr = formatTallyDate(fromDateObj, 'postgres');
+    const toDateStr = formatTallyDate(toDateObj, 'postgres');
+    const fromDateTally = formatTallyDate(fromDateObj, 'tally');
+    const toDateTally = formatTallyDate(toDateObj, 'tally');
+
+    console.log(`📊 Calculating Sales Accounts for ${fromDateStr} to ${toDateStr}`);
+
+    // =====================================================
+    // CORRECT APPROACH: Use Group-Ledger Hierarchy
+    // =====================================================
+    // Step 1: Get all ledgers under "Sales Accounts" group hierarchy
+    // This uses a recursive query to get all child groups and their ledgers
+    
+    const salesLedgersQuery = `
+      WITH RECURSIVE sales_groups AS (
+        -- Base: Sales Accounts group itself
+        SELECT guid, name, parent
+        FROM groups
+        WHERE name = 'Sales Accounts'
+          AND company_guid = $1
+        
+        UNION ALL
+        
+        -- Recursive: All descendant groups
+        SELECT g.guid, g.name, g.parent
+        FROM groups g
+        INNER JOIN sales_groups sg ON g.parent = sg.name
+        WHERE g.company_guid = $1
+      ),
+      sales_ledger_guids AS (
+        -- Get all ledgers under these groups
+        SELECT l.guid, l.name, l.closing_balance, l.opening_balance
+        FROM ledgers l
+        WHERE l.company_guid = $1
+          AND (
+            l.parent_group = 'Sales Accounts'
+            OR l.parent_group IN (SELECT name FROM sales_groups)
+          )
+      )
+      SELECT 
+        COALESCE(SUM(closing_balance), 0) as total_sales,
+        COALESCE(SUM(opening_balance), 0) as opening_sales,
+        COUNT(*) as ledger_count,
+        json_agg(json_build_object(
+          'name', name,
+          'balance', closing_balance
+        )) FILTER (WHERE closing_balance != 0) as ledger_breakdown
+      FROM sales_ledger_guids
+    `;
+
+    const result = await pool.query(salesLedgersQuery, [companyGuid]);
+
+    if (!result.rows || result.rows.length === 0 || !result.rows[0].ledger_count || result.rows[0].ledger_count === 0) {
+      // Fallback: Check if groups/ledgers tables exist and have data
+      const checkGroups = await pool.query('SELECT COUNT(*) as count FROM groups WHERE company_guid = $1', [companyGuid]);
+      const checkLedgers = await pool.query('SELECT COUNT(*) as count FROM ledgers WHERE company_guid = $1', [companyGuid]);
+      
+      if (checkGroups.rows[0].count === 0 || checkLedgers.rows[0].count === 0) {
+        return res.json({
+          success: false,
+          error: 'No sales ledgers found. Please sync groups and ledgers first.',
+          hint: 'Run POST /api/sync/groups and POST /api/sync/ledgers',
+          data: {
+            groupName: 'Sales Accounts',
+            companyName: config?.company?.name || 'Unknown',
+            period: {
+              from: fromDateTally,
+              to: toDateTally,
+              fromFormatted: formatTallyDateForDisplay(fromDateTally),
+              toFormatted: formatTallyDateForDisplay(toDateTally)
+            },
+            closingBalance: {
+              amount: 0,
+              type: 'Credit',
+              formatted: formatCurrency(0)
+            },
+            openingBalance: {
+              amount: 0,
+              type: 'Credit',
+              formatted: formatCurrency(0)
+            }
+          }
+        });
+      }
+      
+      // Groups/ledgers exist but no Sales Accounts found
+      return res.json({
+        success: false,
+        error: 'Sales Accounts group not found in synced data.',
+        hint: 'Ensure "Sales Accounts" group exists in Tally and sync again.',
+        data: {
+          groupName: 'Sales Accounts',
+          companyName: config?.company?.name || 'Unknown',
+          period: {
+            from: fromDateTally,
+            to: toDateTally,
+            fromFormatted: formatTallyDateForDisplay(fromDateTally),
+            toFormatted: formatTallyDateForDisplay(toDateTally)
+          },
+          closingBalance: {
+            amount: 0,
+            type: 'Credit',
+            formatted: formatCurrency(0)
+          },
+          openingBalance: {
+            amount: 0,
+            type: 'Credit',
+            formatted: formatCurrency(0)
+          }
+        }
+      });
+    }
+
+    const salesData = result.rows[0];
+    const totalSales = parseFloat(salesData.total_sales) || 0;
+    const openingSales = parseFloat(salesData.opening_sales) || 0;
+    const ledgerCount = parseInt(salesData.ledger_count) || 0;
+    const breakdown = salesData.ledger_breakdown || [];
+
+    console.log(`✅ Total Sales: ₹${totalSales.toLocaleString('en-IN')}`);
+    console.log(`   Calculated from ${ledgerCount} sales ledgers`);
+    console.log(`   Opening Balance: ₹${openingSales.toLocaleString('en-IN')}`);
+
+    res.json({
+      success: true,
+      data: {
+        groupName: 'Sales Accounts',
+        companyName: config?.company?.name || 'Unknown',
+        period: {
+          from: fromDateTally,
+          to: toDateTally,
+          fromFormatted: formatTallyDateForDisplay(fromDateTally),
+          toFormatted: formatTallyDateForDisplay(toDateTally)
+        },
+        closingBalance: {
+          amount: totalSales,
+          type: 'Credit',
+          formatted: formatCurrency(totalSales)
+        },
+        openingBalance: {
+          amount: openingSales,
+          type: 'Credit',
+          formatted: formatCurrency(openingSales)
+        },
+        ledgerCount: ledgerCount,
+        breakdown: breakdown,
+        calculation_method: 'group_hierarchy',
+        notes: 'Calculated from Sales Accounts group and all its sub-groups'
+      }
+    });
+  } catch (error) {
+    console.error('Error calculating Sales Group Summary:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message,
+      details: 'Error calculating sales from synced transactions'
+    });
+  }
+});
+
+// Helper function to format Tally date for display (converts YYYYMMDD to readable format)
+function formatTallyDateForDisplay(tallyDate) {
+  if (!tallyDate) return '';
+  // Tally date format: YYYYMMDD or YYYY-MM-DD
+  let dateStr = tallyDate.toString();
+  if (dateStr.length === 8 && !dateStr.includes('-')) {
+    // YYYYMMDD format
+    const year = dateStr.substring(0, 4);
+    const month = dateStr.substring(4, 6);
+    const day = dateStr.substring(6, 8);
+    const date = new Date(`${year}-${month}-${day}`);
+    return date.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' });
+  }
+  // Try parsing as is
+  try {
+    const date = new Date(dateStr);
+    return date.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' });
+  } catch {
+    return dateStr;
+  }
+}
+
 
 // Sync transactions from Tally to PostgreSQL
 app.post('/api/sync/transactions', async (req, res) => {
@@ -2700,7 +4193,7 @@ async function autoSync() {
 }
 
 // Start server with auto-sync
-let syncInterval;
+let syncInterval = null;
 
 // Add error handler for server listen
 const server = app.listen(PORT, () => {

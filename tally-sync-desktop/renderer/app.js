@@ -28,6 +28,8 @@ const customerAmount = document.getElementById('customer-amount');
 const salesTotal = document.getElementById('sales-total');
 const salesPillValue = document.getElementById('sales-pill-value');
 const salesBreakdown = document.getElementById('sales-breakdown');
+let salesGroupSummaryData = null; // Track if we have Sales Group Summary data
+const salesGroupSummary = document.getElementById('sales-group-summary');
 const transactionsList = document.getElementById('transactions-list');
 const agingContainer = document.getElementById('aging-container');
 const agingNameFilter = document.getElementById('aging-name-filter');
@@ -385,6 +387,77 @@ async function testConnection(retries = 5, interval = 1000) {
   return false;
 }
 
+// Fetch Sales Group Summary from Tally
+async function fetchSalesGroupSummary() {
+  try {
+    console.log(`📡 Fetching Sales Group Summary from: ${API_URL}/sales/group-summary`);
+    const result = await measureApiCall(`${API_URL}/sales/group-summary`);
+    const { data, metrics } = result;
+    
+    if (!data.success) {
+      const errorMsg = data.error || 'Sales Group Summary API failed';
+      console.error('❌ Sales Group Summary API returned error:', errorMsg);
+      
+      // Show hint if groups/ledgers need to be synced
+      if (data.hint && salesTotal) {
+        salesTotal.textContent = 'Sync Required';
+        const salesPeriod = document.getElementById('sales-period');
+        if (salesPeriod) {
+          salesPeriod.textContent = data.hint;
+        }
+        console.warn('⚠️', data.hint);
+        addLog(`⚠️ ${data.hint}`);
+      }
+      
+      // Still try to show data if available (even if success=false)
+      if (data.data && salesTotal) {
+        const salesData = data.data;
+        salesTotal.textContent = salesData.closingBalance.formatted;
+      }
+      
+      return null;
+    }
+    
+    console.log(`✅ Sales Group Summary API: ${metrics.responseTime}ms | Size: ${formatBytes(metrics.responseSize)}`);
+    addLog(`Sales Group Summary fetched: ${metrics.responseTime}ms`);
+    
+    // Update the Total Sales card with Tally data
+    if (data.data && salesTotal) {
+      salesGroupSummaryData = data.data; // Store the data
+      const salesData = data.data;
+      salesTotal.textContent = salesData.closingBalance.formatted;
+      
+      // Update the period label
+      const salesPeriod = document.getElementById('sales-period');
+      if (salesPeriod) {
+        salesPeriod.textContent = `${salesData.period.fromFormatted} to ${salesData.period.toFormatted}`;
+      }
+      
+      // Update the balance type label
+      const salesBalanceType = document.getElementById('sales-balance-type');
+      if (salesBalanceType) {
+        salesBalanceType.textContent = `Closing Balance (${salesData.closingBalance.type})`;
+      }
+      
+      // Log calculation method
+      if (salesData.calculation_method) {
+        console.log(`📊 Calculation method: ${salesData.calculation_method}`);
+        console.log(`   Ledgers: ${salesData.ledgerCount || 0}`);
+      }
+      
+      console.log(`✅ Sales Group Summary updated: ${salesData.closingBalance.formatted}`);
+    }
+    
+    return data.data;
+  } catch (error) {
+    const errorMsg = error.message || error.toString();
+    console.error('❌ Sales Group Summary fetch error:', errorMsg);
+    addLog(`❌ Sales Group Summary fetch failed: ${errorMsg}`);
+    // Don't throw - allow other data to load
+    return null;
+  }
+}
+
 async function fetchStats() {
   try {
     console.log(`📡 Fetching stats from: ${API_URL}/stats`);
@@ -426,6 +499,9 @@ async function fetchStats() {
     vendorAmount.textContent = formatCurrency(vendors.total_payables || 0);
     customerCount.textContent = customers.total_customers || 0;
     customerAmount.textContent = formatCurrency(Math.abs(customers.total_receivables || 0));
+    
+    // Don't fetch Sales Group Summary here - it will be fetched at the end of loadDashboardData
+    // to ensure it takes precedence over any other sales calculations
 
     const syncCandidates = [
       vendors.last_vendor_sync,
@@ -749,7 +825,10 @@ function renderRecentTransactions() {
 function renderSalesBreakdown() {
   if (!customersCache.length) {
     salesBreakdown.innerHTML = '<p class="no-data">No customer data yet</p>';
-    salesTotal.textContent = formatCurrency(0);
+    // Only update sales total if we don't have Sales Group Summary data
+    if (!salesGroupSummaryData && salesTotal) {
+      salesTotal.textContent = formatCurrency(0);
+    }
     salesPillValue.textContent = formatCurrency(0);
     return;
   }
@@ -757,7 +836,12 @@ function renderSalesBreakdown() {
   const overallTotal = customersCache.reduce((sum, customer) => {
     return sum + Math.max(Number(customer.current_balance) || 0, 0);
   }, 0);
-  salesTotal.textContent = formatCurrency(overallTotal);
+  
+  // DON'T overwrite sales total if we have Sales Group Summary data from Tally
+  // The Sales Group Summary shows the actual sales amount, not customer receivables
+  if (!salesGroupSummaryData && salesTotal) {
+    salesTotal.textContent = formatCurrency(overallTotal);
+  }
 
   let dataset = customersCache.map(customer => ({
     name: customer.name,
@@ -1145,6 +1229,39 @@ async function syncNow() {
     // Notify backend that manual sync is starting (to delay auto-sync)
     await fetch(`${API_URL}/sync/manual-start`, { method: 'POST' }).catch(() => {});
     
+    // Sync groups (required for accurate Sales Accounts calculation)
+    syncBtn.textContent = 'Syncing... 📊 groups';
+    addLog('📊 Syncing groups from Tally...');
+    const groupsResponse = await fetch(`${API_URL}/sync/groups`, { method: 'POST' });
+    const groupsData = await groupsResponse.json();
+    if (groupsData.success) {
+      addLog(`📊 Groups: ${groupsData.count || 0} synced`);
+    } else {
+      addLog(`⚠️ Groups sync: ${groupsData.error || 'Failed'}`);
+    }
+    
+    // Sync ledgers (complete with all fields - addresses, PAN, GSTIN, etc.)
+    syncBtn.textContent = 'Syncing... 📋 ledgers';
+    addLog('📋 Syncing ledgers (complete) from Tally...');
+    const ledgersResponse = await fetch(`${API_URL}/sync/ledgers`, { method: 'POST' });
+    const ledgersData = await ledgersResponse.json();
+    if (ledgersData.success) {
+      addLog(`📋 Ledgers: ${ledgersData.count || 0} synced (with addresses & details)`);
+    } else {
+      addLog(`⚠️ Ledgers sync: ${ledgersData.error || 'Failed'}`);
+    }
+    
+    // Sync items (stock items, services)
+    syncBtn.textContent = 'Syncing... 📦 items';
+    addLog('📦 Syncing items from Tally...');
+    const itemsResponse = await fetch(`${API_URL}/sync/items`, { method: 'POST' });
+    const itemsData = await itemsResponse.json();
+    if (itemsData.success) {
+      addLog(`📦 Items: ${itemsData.count || 0} synced`);
+    } else {
+      addLog(`⚠️ Items sync: ${itemsData.error || 'Failed'}`);
+    }
+    
     // Sync vendors
     syncBtn.textContent = 'Syncing... 📦 vendors';
     const vendorResponse = await fetch(`${API_URL}/sync/vendors`, { method: 'POST' });
@@ -1163,9 +1280,31 @@ async function syncNow() {
     }
     addLog(`👥 Customers: ${customerData.count || 0} synced`);
     
-    // Sync transactions with progress tracking
-    syncBtn.textContent = 'Syncing... 💰 transactions (0%)';
-    addLog('💰 Syncing transactions...');
+    // Sync vouchers (complete with double-entry, addresses, items)
+    syncBtn.textContent = 'Syncing... 💰 vouchers (complete)';
+    addLog('💰 Syncing vouchers (complete structure)...');
+    
+    const vouchersResponse = await fetch(`${API_URL}/sync/vouchers-complete`, { 
+      method: 'POST', 
+      headers: { 'Content-Type': 'application/json' }, 
+      body: JSON.stringify({}) 
+    });
+    
+    if (!vouchersResponse.ok) {
+      const errorText = await vouchersResponse.text();
+      throw new Error(`Vouchers sync failed: ${errorText}`);
+    }
+    
+    const vouchersData = await vouchersResponse.json();
+    if (!vouchersData.success) {
+      throw new Error(vouchersData.error || 'Vouchers sync failed');
+    }
+    
+    addLog(`💰 Vouchers: ${vouchersData.vouchers || 0} synced with ${vouchersData.lineItems || 0} line items`);
+    
+    // Also sync old transactions endpoint for backward compatibility
+    syncBtn.textContent = 'Syncing... 💰 transactions (legacy)';
+    addLog('💰 Syncing transactions (legacy format)...');
     startProgressPolling(); // Start polling for progress updates
     
     const transactionResponse = await fetch(`${API_URL}/sync/transactions`, { 
@@ -1178,23 +1317,17 @@ async function syncNow() {
     
     if (!transactionResponse.ok) {
       const errorText = await transactionResponse.text();
-      throw new Error(`Transaction sync failed: ${errorText}`);
+      console.warn(`Legacy transaction sync failed: ${errorText}`);
+      // Don't throw - vouchers-complete is the primary sync
+    } else {
+      const transactionData = await transactionResponse.json();
+      if (transactionData.success) {
+        const syncMode = transactionData.syncMode || 'full';
+        const modeEmoji = syncMode === 'incremental' ? '⚡' : '📦';
+        const modeLabel = syncMode === 'incremental' ? 'INCREMENTAL' : 'FULL';
+        addLog(`${modeEmoji} Legacy transactions: ${transactionData.count || 0} synced (${modeLabel})`);
+      }
     }
-    
-    const transactionData = await transactionResponse.json();
-    if (!transactionData.success) {
-      throw new Error(transactionData.error || 'Transaction sync failed');
-    }
-    
-    // Build informative sync message with mode indicator
-    const syncMode = transactionData.syncMode || 'full';
-    const modeEmoji = syncMode === 'incremental' ? '⚡' : '📦';
-    const modeLabel = syncMode === 'incremental' ? 'INCREMENTAL' : 'FULL';
-    const syncMsg = `${modeEmoji} Transactions: ${transactionData.count || 0} synced (${modeLabel})`;
-    const periodMsg = transactionData.period ? ` [${transactionData.period.from} → ${transactionData.period.to}]` : '';
-    const durationMsg = transactionData.duration ? ` in ${transactionData.duration}` : '';
-    const errorMsg = transactionData.errorCount > 0 ? ` [${transactionData.errorCount} errors]` : '';
-    addLog(syncMsg + periodMsg + durationMsg + errorMsg);
     
     // Calculate analytics
     syncBtn.textContent = 'Syncing... 📊 analytics';
@@ -1240,6 +1373,10 @@ async function loadDashboardData() {
     await fetchCustomers();
     await fetchTransactions();
     await fetchAging();
+    
+    // Fetch Sales Group Summary LAST to ensure it takes precedence
+    // This will overwrite any sales values set by other functions
+    await fetchSalesGroupSummary();
     
     const loadEndTime = performance.now();
     const totalLoadTime = Math.round(loadEndTime - loadStartTime);
