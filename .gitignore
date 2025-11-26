@@ -1,0 +1,17 @@
+node_modules/
+.env
+*.log
+.DS_Store
+
+# Build artifacts
+dist/
+dist-portable/
+*.exe
+*.zip
+*.blockmap
+*.dmg
+*.AppImage
+
+# Electron build outputs
+build/
+*.asar

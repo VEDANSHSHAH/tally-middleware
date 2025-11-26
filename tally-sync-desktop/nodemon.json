@@ -1,0 +1,5 @@
+{
+    "ignore": ["config.json", "*.log"],
+    "watch": ["main.js", "preload.js", "server/", "renderer/"],
+    "exec": "electron ."
+}

@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Tally Cloud Sync</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="container">
+    <header>
+      <div style="display: flex; justify-content: space-between; align-items: center; width: 100%;">
+        <div>
+          <h1>Tally Cloud Sync</h1>
+          <p class="subtitle">Syncing your Tally data to the cloud with AI Analytics</p>
+        </div>
+        <button id="settings-btn" class="settings-btn" title="Change Company Settings - Opens Setup Wizard">⚙️ Change Company</button>
+      </div>
+      <div id="company-info" class="company-info" style="margin-top: 15px; padding: 12px; background: #f0f4ff; border-radius: 8px; border-left: 4px solid #667eea; display: none;">
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+          <div>
+            <strong style="color: #667eea; font-size: 14px;">🏢 Company:</strong>
+            <span id="company-name-display" style="color: #333; margin-left: 8px; font-weight: 600;">-</span>
+          </div>
+          <div style="margin-left: 20px;">
+            <strong style="color: #667eea; font-size: 12px;">GUID:</strong>
+            <span id="company-guid-display" style="color: #666; margin-left: 8px; font-size: 12px; font-family: monospace;">-</span>
+          </div>
+        </div>
+      </div>
+    </header>
+
+    <div class="dashboard-grid">
+      <section class="main-column">
+        <div class="status-card">
+            <div class="status-item">
+              <span class="icon" aria-hidden="true">&#9679;</span>
+              <div>
+                <strong>Status</strong>
+                <p id="connection-status">Connecting...</p>
+              </div>
+            </div>
+            <div class="status-item">
+              <span class="icon" aria-hidden="true">&#9202;</span>
+              <div>
+                <strong>Last Sync</strong>
+                <p id="last-sync">Never</p>
+              </div>
+            </div>
+            <div class="status-item">
+              <span class="icon" aria-hidden="true">&#128188;</span>
+              <div>
+                <strong>Business</strong>
+                <p id="business-name">Detecting...</p>
+                <p class="status-subtext" id="business-id">ID: --</p>
+              </div>
+            </div>
+        </div>
+
+        <div class="stats-grid">
+          <div class="stat-card">
+            <div class="stat-icon">V</div>
+            <h3>Vendors</h3>
+            <p class="stat-value" id="vendor-count">-</p>
+            <p class="stat-label">Total Payables</p>
+            <p class="stat-amount" id="vendor-amount">₹0</p>
+          </div>
+          <div class="stat-card">
+            <div class="stat-icon">C</div>
+            <h3>Customers</h3>
+            <p class="stat-value" id="customer-count">-</p>
+            <p class="stat-label">Total Receivables</p>
+            <p class="stat-amount" id="customer-amount">₹0</p>
+          </div>
+          <div class="stat-card highlight">
+            <div class="stat-icon">₹</div>
+            <h3>Total Sales</h3>
+            <p class="stat-value" id="sales-total">-</p>
+            <p class="stat-label">Customer wise</p>
+            <p class="stat-amount muted">Updated live</p>
+          </div>
+        </div>
+
+        <section class="card collection-card">
+          <div class="card-header">
+            <div>
+              <h2>Collection Timer</h2>
+              <p>Next payment follow-up</p>
+            </div>
+            <div class="collection-countdown" id="collection-countdown">--</div>
+          </div>
+          <div class="collection-body">
+            <div>
+              <p class="collection-label">Customer</p>
+              <p class="collection-value" id="collection-customer">--</p>
+            </div>
+            <div>
+              <p class="collection-label">Due amount</p>
+              <p class="collection-amount" id="collection-amount">₹0</p>
+              <p class="collection-note" id="collection-note">Awaiting data...</p>
+            </div>
+          </div>
+        </section>
+
+        <section class="card sales-card">
+          <div class="card-header">
+            <div>
+              <h2>Sales Snapshot</h2>
+              <p>Customer-wise break up of receivables</p>
+            </div>
+            <div class="sales-pill" id="sales-pill-value">₹0</div>
+          </div>
+          <div class="filter-bar">
+            <div class="filter-control">
+              <label for="customer-amount-filter">Amount</label>
+              <select id="customer-amount-filter">
+                <option value="all">All customers</option>
+                <option value="high">₹25k+</option>
+                <option value="mid">₹10k - ₹25k</option>
+                <option value="low">&lt; ₹10k</option>
+              </select>
+            </div>
+            <div class="filter-control">
+              <label for="customer-activity-filter">Activity</label>
+              <select id="customer-activity-filter">
+                <option value="all">All activity</option>
+                <option value="active">Active (last 30 days)</option>
+                <option value="dormant">Dormant (&gt;30 days)</option>
+              </select>
+            </div>
+          </div>
+          <div id="sales-breakdown" class="sales-list">
+            <p class="loading">Waiting for customer data...</p>
+          </div>
+        </section>
+
+        <section class="card transactions-card">
+          <div class="card-header">
+            <div>
+              <h2>Recent Transactions</h2>
+              <p>Latest vouchers with synced Tally items</p>
+            </div>
+          </div>
+          <div id="transactions-list" class="transactions-list">
+            <p class="loading">Waiting for transaction data...</p>
+          </div>
+        </section>
+
+        <section class="card formula-card">
+          <div class="card-header">
+            <div>
+              <h2>Receivables Health</h2>
+              <p>Opening Balance + (Sales + GST) - Receipts = Closing Balance</p>
+            </div>
+          </div>
+          <div class="formula-grid">
+            <div>
+              <span>Opening Balance</span>
+              <strong id="formula-opening">₹0</strong>
+            </div>
+            <div>
+              <span>Sales + GST</span>
+              <strong id="formula-sales">₹0</strong>
+            </div>
+            <div>
+              <span>Receipts</span>
+              <strong id="formula-receipts">₹0</strong>
+            </div>
+            <div>
+              <span>Closing Balance</span>
+              <strong id="formula-closing">₹0</strong>
+            </div>
+          </div>
+        </section>
+
+        <section class="card">
+          <div class="card-header">
+            <h2>Outstanding Aging</h2>
+            <div class="aging-tabs">
+              <button class="aging-tab active" data-view="vendors">Vendors</button>
+              <button class="aging-tab" data-view="customers">Customers</button>
+              <button class="aging-tab" data-view="all">All</button>
+            </div>
+          </div>
+          <div class="aging-controls">
+            <div class="aging-search">
+              <input type="text" id="aging-name-filter" placeholder="Search name..." aria-label="Search by name">
+            </div>
+            <div class="aging-pagination" id="aging-pagination" aria-label="Aging pagination"></div>
+          </div>
+          <div id="aging-container">
+            <p class="loading">Loading aging analysis...</p>
+          </div>
+        </section>
+      </section>
+
+      <aside class="insights-column">
+        <section class="card ai-launch-card">
+          <div class="card-header">
+            <div>
+              <h2>AI Insights</h2>
+              <p>Run deep analytics only when needed to save tokens.</p>
+            </div>
+            <button id="open-ai-insights" class="btn-secondary small">Open Insights</button>
+          </div>
+        </section>
+
+        <section class="card ai-search-card">
+          <div class="card-header">
+            <div>
+              <h2>Ask Your Data</h2>
+              <p>Type a question like "Show Test Vendor history" or "Which customer owes the most?"</p>
+            </div>
+            <button id="ai-search-btn" class="btn-secondary small">Ask AI</button>
+          </div>
+        </section>
+
+        <section class="card actions-card">
+          <h2>Quick Actions</h2>
+          <div class="actions">
+            <button id="sync-btn" class="btn-primary">
+              Sync Now
+            </button>
+            <button id="refresh-btn" class="btn-secondary">
+              Refresh
+            </button>
+          </div>
+        </section>
+
+        <section class="card activity-card">
+          <h2>Recent Activity</h2>
+          <div id="log-entries">
+            <p class="log-entry">Waiting for first sync...</p>
+          </div>
+        </section>
+      </aside>
+    </div>
+  </div>
+
+  <div class="ai-modal hidden" id="ai-modal">
+    <div class="ai-modal-backdrop"></div>
+    <div class="ai-modal-content">
+      <button class="ai-modal-close" id="ai-modal-close" aria-label="Close AI search">&times;</button>
+      <h2>Ask AI About Your Data</h2>
+      <p class="modal-subtitle">The AI will analyze your synced vendors, customers, invoices, and analytics.</p>
+      <form id="ai-query-form">
+        <label for="ai-question">Your question</label>
+        <textarea id="ai-question" rows="4" placeholder="e.g. Which vendor has the longest payment delays?"></textarea>
+        <div class="ai-modal-actions">
+          <button type="submit" class="btn-primary" id="ai-query-submit">Ask AI</button>
+          <button type="button" class="btn-secondary" id="ai-modal-cancel">Cancel</button>
+        </div>
+      </form>
+      <div id="ai-answer" class="ai-answer hidden"></div>
+    </div>
+  </div>
+
+  <div class="ai-modal hidden" id="ai-insights-modal">
+    <div class="ai-modal-backdrop"></div>
+    <div class="ai-modal-content insights-panel">
+      <button class="ai-modal-close" id="ai-insights-close" aria-label="Close AI insights">&times;</button>
+      <h2>AI Insights</h2>
+      <p class="modal-subtitle">Insights load on demand so you only spend tokens when required.</p>
+      <div id="ai-insights-status" class="loading">Click Open Insights to fetch the latest analysis.</div>
+      <div id="ai-insights-list" class="ai-insights-modal-list"></div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

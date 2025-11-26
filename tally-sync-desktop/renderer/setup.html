@@ -1,0 +1,470 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Company Setup - Tally Cloud Sync</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 100vh;
+      padding: 20px;
+    }
+
+    .setup-container {
+      background: white;
+      border-radius: 16px;
+      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+      max-width: 600px;
+      width: 100%;
+      padding: 40px;
+      animation: slideIn 0.5s ease;
+    }
+
+    @keyframes slideIn {
+      from {
+        opacity: 0;
+        transform: translateY(-20px);
+      }
+
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
+    }
+
+    .logo {
+      text-align: center;
+      margin-bottom: 30px;
+    }
+
+    .logo h1 {
+      color: #667eea;
+      font-size: 28px;
+      margin-bottom: 10px;
+    }
+
+    .logo p {
+      color: #666;
+      font-size: 14px;
+    }
+
+    .tab-buttons {
+      display: flex;
+      gap: 10px;
+      margin-bottom: 30px;
+    }
+
+    .tab-btn {
+      flex: 1;
+      padding: 12px;
+      border: 2px solid #e0e0e0;
+      background: white;
+      border-radius: 8px;
+      cursor: pointer;
+      font-size: 14px;
+      font-weight: 600;
+      transition: all 0.3s;
+    }
+
+    .tab-btn.active {
+      background: #667eea;
+      color: white;
+      border-color: #667eea;
+    }
+
+    .tab-content {
+      display: none;
+    }
+
+    .tab-content.active {
+      display: block;
+      animation: fadeIn 0.3s;
+    }
+
+    @keyframes fadeIn {
+      from {
+        opacity: 0;
+      }
+
+      to {
+        opacity: 1;
+      }
+    }
+
+    .auto-detect-section {
+      text-align: center;
+      padding: 30px 0;
+    }
+
+    .detect-btn {
+      background: #667eea;
+      color: white;
+      border: none;
+      padding: 15px 40px;
+      border-radius: 8px;
+      font-size: 16px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.3s;
+      margin-bottom: 20px;
+    }
+
+    .detect-btn:hover:not(:disabled) {
+      background: #5568d3;
+      transform: translateY(-2px);
+      box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
+    }
+
+    .detect-btn:disabled {
+      background: #ccc;
+      cursor: not-allowed;
+    }
+
+    .detected-info {
+      background: #f0f4ff;
+      border: 2px solid #667eea;
+      border-radius: 8px;
+      padding: 20px;
+      margin-top: 20px;
+      text-align: left;
+    }
+
+    .detected-info h3 {
+      color: #667eea;
+      margin-bottom: 15px;
+      font-size: 18px;
+    }
+
+    .info-row {
+      margin-bottom: 10px;
+      display: flex;
+      align-items: flex-start;
+    }
+
+    .info-label {
+      font-weight: 600;
+      color: #333;
+      min-width: 120px;
+    }
+
+    .info-value {
+      color: #666;
+      word-break: break-all;
+    }
+
+    .form-group {
+      margin-bottom: 20px;
+    }
+
+    .form-group label {
+      display: block;
+      margin-bottom: 8px;
+      color: #333;
+      font-weight: 600;
+      font-size: 14px;
+    }
+
+    .form-group input {
+      width: 100%;
+      padding: 12px;
+      border: 2px solid #e0e0e0;
+      border-radius: 8px;
+      font-size: 14px;
+      transition: border-color 0.3s;
+    }
+
+    .form-group input:focus {
+      outline: none;
+      border-color: #667eea;
+    }
+
+    .form-group small {
+      display: block;
+      margin-top: 5px;
+      color: #999;
+      font-size: 12px;
+    }
+
+    .warning-box {
+      background: #fff3cd;
+      border: 2px solid #ffc107;
+      border-radius: 8px;
+      padding: 15px;
+      margin: 20px 0;
+      display: none;
+    }
+
+    .warning-box.show {
+      display: block;
+    }
+
+    .warning-box p {
+      color: #856404;
+      font-size: 14px;
+      margin: 0;
+    }
+
+    .error-box {
+      background: #f8d7da;
+      border: 2px solid #f5c6cb;
+      border-radius: 8px;
+      padding: 15px;
+      margin: 20px 0;
+      display: none;
+    }
+
+    .error-box.show {
+      display: block;
+    }
+
+    .error-box p {
+      color: #721c24;
+      font-size: 14px;
+      margin: 0;
+    }
+
+    .success-box {
+      background: #d4edda;
+      border: 2px solid #c3e6cb;
+      border-radius: 8px;
+      padding: 15px;
+      margin: 20px 0;
+      display: none;
+    }
+
+    .success-box.show {
+      display: block;
+    }
+
+    .success-box p {
+      color: #155724;
+      font-size: 14px;
+      margin: 0;
+    }
+
+    .action-buttons {
+      display: flex;
+      gap: 10px;
+      margin-top: 30px;
+    }
+
+    .btn {
+      flex: 1;
+      padding: 12px;
+      border: none;
+      border-radius: 8px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.3s;
+    }
+
+    .btn-primary {
+      background: #667eea;
+      color: white;
+    }
+
+    .btn-primary:hover:not(:disabled) {
+      background: #5568d3;
+      transform: translateY(-2px);
+    }
+
+    .btn-primary:disabled {
+      background: #ccc;
+      cursor: not-allowed;
+    }
+
+    .btn-secondary {
+      background: #6c757d;
+      color: white;
+    }
+
+    .btn-secondary:hover {
+      background: #5a6268;
+    }
+
+    .help-text {
+      background: #f8f9fa;
+      border-left: 4px solid #667eea;
+      padding: 15px;
+      margin: 20px 0;
+      border-radius: 4px;
+    }
+
+    .help-text p {
+      font-size: 13px;
+      color: #666;
+      margin: 5px 0;
+    }
+
+    .status-box {
+      padding: 15px;
+      border-radius: 8px;
+      margin: 20px 0;
+      border: 2px solid transparent;
+    }
+
+    .status-box.warning {
+      background: #fff3cd;
+      border-color: #ffc107;
+      color: #856404;
+    }
+
+    .status-box.error {
+      background: #f8d7da;
+      border-color: #f5c6cb;
+      color: #721c24;
+    }
+
+    .status-box.success {
+      background: #d4edda;
+      border-color: #c3e6cb;
+      color: #155724;
+    }
+
+    .auto-detect-status {
+      text-align: center;
+      padding: 10px;
+      background: #f8f9fa;
+      border-radius: 8px;
+      margin-bottom: 20px;
+      color: #666;
+      font-size: 14px;
+      display: none;
+    }
+
+    .loading-spinner {
+      display: inline-block;
+      width: 12px;
+      height: 12px;
+      border: 2px solid #667eea;
+      border-radius: 50%;
+      border-top-color: transparent;
+      animation: spin 1s linear infinite;
+      margin-right: 8px;
+    }
+  </style>
+</head>
+
+<body>
+  <div class="setup-container">
+    <div class="logo">
+      <h1>🏢 Company Setup</h1>
+      <p>Connect your Tally company to Tally Cloud Sync</p>
+    </div>
+
+    <div class="tab-buttons">
+      <button class="tab-btn active" data-tab="auto">⚡ Auto-Detect</button>
+      <button class="tab-btn" data-tab="manual">✍️ Manual Entry</button>
+    </div>
+
+    <!-- AUTO-DETECT TAB -->
+    <div class="tab-content active" id="auto-tab">
+      <div class="help-text">
+        <p><strong>📌 Make sure Tally is running</strong></p>
+        <p>• Open your Tally company</p>
+        <p>• Tally ODBC should be enabled (Port 9000)</p>
+        <p>• Click "Auto-Detect" to fetch company details</p>
+      </div>
+
+      <div class="auto-detect-section">
+        <button class="detect-btn" id="auto-detect-btn">
+          🔍 Auto-Detect from Tally
+        </button>
+
+        <div class="auto-detect-status" id="detect-status" style="display: none;">
+          <span class="loading-spinner"></span> Detecting...
+        </div>
+
+        <div id="company-selection-container" style="display: none; margin-top: 20px; text-align: left;">
+          <label for="company-select" style="display: block; margin-bottom: 8px; font-weight: 600; color: #333;">Select
+            Company:</label>
+          <select id="company-select"
+            style="width: 100%; padding: 10px; border-radius: 8px; border: 2px solid #e0e0e0; font-size: 14px;">
+            <option value="">-- Select a Company --</option>
+          </select>
+        </div>
+
+        <div class="detected-info" id="detected-info" style="display: none;">
+          <h3>✅ Company Selected!</h3>
+          <div class="info-row">
+            <span class="info-label">Company Name:</span>
+            <span class="info-value" id="detected-name">-</span>
+          </div>
+          <div class="info-row">
+            <span class="info-label">Company GUID:</span>
+            <span class="info-value" id="detected-guid">-</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="error-box" id="auto-error">
+        <p id="auto-error-msg"></p>
+      </div>
+
+      <div class="action-buttons">
+        <button class="btn btn-primary" id="use-detected-btn" disabled>
+          ✅ Use This Company
+        </button>
+      </div>
+    </div>
+
+    <!-- MANUAL ENTRY TAB -->
+    <div class="tab-content" id="manual-tab">
+      <div class="help-text">
+        <p><strong>📝 Enter company details manually</strong></p>
+        <p>• Get GUID from Tally: Gateway → F11 → Statutory & Taxation</p>
+        <p>• Or use any unique identifier</p>
+      </div>
+
+      <form id="manual-form">
+        <div class="form-group">
+          <label for="manual-name">Company Name *</label>
+          <input type="text" id="manual-name" placeholder="e.g., ABC Traders Pvt Ltd" required>
+        </div>
+
+        <div class="form-group">
+          <label for="manual-guid">Company GUID *</label>
+          <input type="text" id="manual-guid" placeholder="e.g., 324658f9-31f0-4ba7-9470-91e034b66a6b" required>
+          <small>Unique identifier (36 characters with hyphens)</small>
+        </div>
+
+        <div class="warning-box" id="manual-warning">
+          <p id="manual-warning-msg"></p>
+        </div>
+
+        <div class="error-box" id="manual-error">
+          <p id="manual-error-msg"></p>
+        </div>
+
+        <div class="success-box" id="manual-success">
+          <p>✅ Company details verified successfully!</p>
+        </div>
+
+        <div class="action-buttons">
+          <button type="button" class="btn btn-secondary" id="verify-btn">
+            🔍 Verify with Tally
+          </button>
+          <button type="submit" class="btn btn-primary">
+            💾 Save & Continue
+          </button>
+        </div>
+      </form>
+    </div>
+  </div>
+  <script src="setup.js"></script>
+</body>
+
+</html>
