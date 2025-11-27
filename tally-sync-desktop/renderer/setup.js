@@ -1,15 +1,20 @@
 // Get API URL from electronAPI if available, otherwise use default
 let API_URL = 'http://localhost:3000/api';
 
-// Initialize API URL on page load
+// Initialize API URL on page load - wait for it to complete
+let apiUrlInitialized = false;
 (async () => {
   if (window.electronAPI && window.electronAPI.getApiUrl) {
     try {
       API_URL = await window.electronAPI.getApiUrl();
-      console.log('API URL:', API_URL);
+      console.log('API URL initialized:', API_URL);
+      apiUrlInitialized = true;
     } catch (error) {
       console.warn('Could not get API URL from main process, using default:', error);
+      apiUrlInitialized = true; // Mark as initialized even on error
     }
+  } else {
+    apiUrlInitialized = true; // No electronAPI, use default
   }
 })();
 
@@ -54,6 +59,26 @@ autoDetectBtn.addEventListener('click', async () => {
   useDetectedBtn.disabled = true;
 
   try {
+    // Wait for API URL to be initialized
+    if (!apiUrlInitialized) {
+      detectStatus.innerHTML = '<span class="loading-spinner"></span> Initializing...';
+      // Wait up to 2 seconds for API URL initialization
+      let waitCount = 0;
+      while (!apiUrlInitialized && waitCount < 20) {
+        await new Promise(resolve => setTimeout(resolve, 100));
+        waitCount++;
+      }
+    }
+    
+    // Ensure we have a valid API URL
+    if (!API_URL || API_URL.includes('8000')) {
+      // Fallback to default if somehow got wrong port
+      API_URL = 'http://localhost:3000/api';
+      console.warn('Using fallback API URL:', API_URL);
+    }
+    
+    console.log('Using API URL:', API_URL);
+    
     // First check if server is up with retry logic
     let testRes = null;
     let retries = 0;
