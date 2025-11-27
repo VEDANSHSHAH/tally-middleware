@@ -1120,3 +1120,221 @@ button {
 .actions-card h2 {
   margin-bottom: 16px;
 }
+
+/* Advanced analytics */
+.analytics-card .card-header p {
+  margin: 4px 0 0;
+  color: var(--muted);
+}
+
+.analytics-body {
+  margin-top: 14px;
+}
+
+.analytics-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 16px;
+}
+
+.performance-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+}
+
+.performance-card {
+  background: #f6f8ff;
+  border-radius: 12px;
+  padding: 12px;
+}
+
+.performance-card h4 {
+  margin: 0 0 8px;
+  font-size: 15px;
+}
+
+.metric {
+  display: flex;
+  justify-content: space-between;
+  margin: 4px 0;
+  font-size: 13px;
+}
+
+.metric .label {
+  color: var(--muted);
+}
+
+.metric .value {
+  font-weight: 600;
+}
+
+.trend-chip {
+  display: inline-block;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: #ecfdf3;
+  color: #14804a;
+  font-weight: 600;
+  font-size: 12px;
+}
+
+.analytics-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 8px;
+}
+
+.analytics-table th,
+.analytics-table td {
+  padding: 10px;
+  text-align: left;
+  border-bottom: 1px solid rgba(15, 23, 42, 0.08);
+}
+
+.analytics-table th {
+  color: var(--muted);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.analytics-table tr:hover {
+  background: #f6f8ff;
+}
+
+.reliability-bar {
+  position: relative;
+  background: #eef2ff;
+  border-radius: 999px;
+  height: 10px;
+  overflow: hidden;
+}
+
+.reliability-fill {
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 100%;
+  background: linear-gradient(90deg, #4f46e5, #6366f1);
+}
+
+.reliability-bar + span {
+  display: inline-block;
+  margin-left: 8px;
+  font-weight: 600;
+  font-size: 12px;
+}
+
+.risk-badge {
+  display: inline-block;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-weight: 600;
+  font-size: 12px;
+}
+
+.risk-low {
+  background: #ecfdf3;
+  color: #14804a;
+}
+
+.risk-medium {
+  background: #fff7ed;
+  color: #c05621;
+}
+
+.risk-high {
+  background: #fef2f2;
+  color: #b91c1c;
+}
+
+.overdue-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.summary-tile {
+  background: #f6f8ff;
+  padding: 10px;
+  border-radius: 10px;
+}
+
+.summary-tile span {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.summary-tile strong {
+  display: block;
+  margin-top: 4px;
+  font-size: 18px;
+}
+
+.summary-label {
+  color: var(--muted);
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.forecast-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.forecast-card {
+  padding: 10px;
+  border-radius: 10px;
+  background: #f6f8ff;
+}
+
+.search-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.search-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.search-field label {
+  font-size: 12px;
+  color: var(--muted);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.search-field input {
+  border: 1px solid rgba(15, 23, 42, 0.12);
+  border-radius: 10px;
+  padding: 8px 10px;
+}
+
+.search-actions {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+.btn-primary.small,
+.btn-secondary.small {
+  padding: 8px 14px;
+  font-size: 13px;
+}
+
+.payment-patterns-table th:nth-child(3),
+.payment-patterns-table td:nth-child(3) {
+  min-width: 180px;
+}

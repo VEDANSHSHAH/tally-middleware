@@ -192,6 +192,116 @@
             <p class="loading">Loading aging analysis...</p>
           </div>
         </section>
+
+        <section class="card analytics-card">
+          <div class="card-header">
+            <div>
+              <h2>Performance Dashboard</h2>
+              <p>Real-time sync health powered by indexed history</p>
+            </div>
+          </div>
+          <div id="performance-dashboard" class="analytics-body">
+            <p class="loading">Loading performance metrics...</p>
+          </div>
+        </section>
+
+        <div class="analytics-grid">
+          <section class="card analytics-card">
+            <div class="card-header">
+              <div>
+                <h2>Revenue Trends</h2>
+                <p>Last 12 months with simple forecasts</p>
+              </div>
+            </div>
+            <div id="revenue-trends" class="analytics-body">
+              <p class="loading">Calculating revenue trends...</p>
+            </div>
+          </section>
+
+          <section class="card analytics-card">
+            <div class="card-header">
+              <div>
+                <h2>Collection Priority</h2>
+                <p>High-risk customers ranked for action</p>
+              </div>
+            </div>
+            <div id="collection-priority" class="analytics-body">
+              <p class="loading">Building collection plan...</p>
+            </div>
+          </section>
+        </div>
+
+        <div class="analytics-grid">
+          <section class="card analytics-card">
+            <div class="card-header">
+              <div>
+                <h2>Overdue Analysis</h2>
+                <p>Buckets, totals, and top overdue customers</p>
+              </div>
+            </div>
+            <div id="overdue-analysis" class="analytics-body">
+              <p class="loading">Loading overdue breakdown...</p>
+            </div>
+          </section>
+
+          <section class="card analytics-card">
+            <div class="card-header">
+              <div>
+                <h2>Payment Patterns</h2>
+                <p>Reliability and predicted payment cycles</p>
+              </div>
+            </div>
+            <div id="payment-patterns" class="analytics-body">
+              <p class="loading">Scanning receipts...</p>
+            </div>
+          </section>
+        </div>
+
+        <section class="card analytics-card">
+          <div class="card-header">
+            <div>
+              <h2>Transaction Search</h2>
+              <p>Indexed search across vouchers, parties, and dates</p>
+            </div>
+          </div>
+          <form id="transaction-search-form" class="search-grid">
+            <div class="search-field">
+              <label for="tx-party">Party</label>
+              <input id="tx-party" name="party" type="text" placeholder="Customer / vendor">
+            </div>
+            <div class="search-field">
+              <label for="tx-voucher-number">Voucher #</label>
+              <input id="tx-voucher-number" name="voucherNumber" type="text" placeholder="INV-001">
+            </div>
+            <div class="search-field">
+              <label for="tx-from-date">From</label>
+              <input id="tx-from-date" name="fromDate" type="date">
+            </div>
+            <div class="search-field">
+              <label for="tx-to-date">To</label>
+              <input id="tx-to-date" name="toDate" type="date">
+            </div>
+            <div class="search-field">
+              <label for="tx-min-amount">Min Amount</label>
+              <input id="tx-min-amount" name="minAmount" type="number" step="0.01" min="0" placeholder="0">
+            </div>
+            <div class="search-field">
+              <label for="tx-max-amount">Max Amount</label>
+              <input id="tx-max-amount" name="maxAmount" type="number" step="0.01" min="0" placeholder="50000">
+            </div>
+            <div class="search-field">
+              <label for="tx-voucher-type">Voucher Type</label>
+              <input id="tx-voucher-type" name="voucherType" type="text" placeholder="Sales / Receipt">
+            </div>
+            <div class="search-actions">
+              <button type="submit" class="btn-primary small">Search</button>
+              <button type="button" class="btn-secondary small" id="tx-clear">Clear</button>
+            </div>
+          </form>
+          <div id="transaction-search-results" class="analytics-body">
+            <p class="no-data">Run a search to see results</p>
+          </div>
+        </section>
       </section>
 
       <aside class="insights-column">

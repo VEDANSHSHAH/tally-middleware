@@ -1367,6 +1367,108 @@ app.get('/api/transactions/metadata', async (req, res) => {
   }
 });
 
+// Fast, indexed transaction search with flexible filters
+app.get('/api/transactions/search', async (req, res) => {
+  try {
+    const config = loadConfig();
+    const companyGuid = config?.company?.guid;
+
+    if (!companyGuid) {
+      return res.json({
+        success: false,
+        error: 'Company not configured. Please run setup first.'
+      });
+    }
+
+    const {
+      party,
+      voucherNumber,
+      fromDate,
+      toDate,
+      minAmount,
+      maxAmount,
+      voucherType,
+      limit = 50
+    } = req.query;
+
+    const conditions = ['company_guid = $1'];
+    const params = [companyGuid];
+    let paramIndex = 2;
+
+    if (party) {
+      conditions.push(`party_name ILIKE $${paramIndex}`);
+      params.push(`%${party}%`);
+      paramIndex += 1;
+    }
+
+    if (voucherNumber) {
+      conditions.push(`voucher_number ILIKE $${paramIndex}`);
+      params.push(`%${voucherNumber}%`);
+      paramIndex += 1;
+    }
+
+    if (fromDate) {
+      conditions.push(`date >= $${paramIndex}`);
+      params.push(fromDate);
+      paramIndex += 1;
+    }
+
+    if (toDate) {
+      conditions.push(`date <= $${paramIndex}`);
+      params.push(toDate);
+      paramIndex += 1;
+    }
+
+    if (minAmount) {
+      conditions.push(`ABS(amount) >= $${paramIndex}`);
+      params.push(minAmount);
+      paramIndex += 1;
+    }
+
+    if (maxAmount) {
+      conditions.push(`ABS(amount) <= $${paramIndex}`);
+      params.push(maxAmount);
+      paramIndex += 1;
+    }
+
+    if (voucherType) {
+      conditions.push(`voucher_type ILIKE $${paramIndex}`);
+      params.push(`%${voucherType}%`);
+      paramIndex += 1;
+    }
+
+    const query = `
+      SELECT 
+        voucher_number,
+        date,
+        party_name,
+        amount,
+        voucher_type,
+        narration
+      FROM transactions
+      WHERE ${conditions.join(' AND ')}
+      ORDER BY date DESC
+      LIMIT $${paramIndex}
+    `;
+
+    params.push(limit);
+
+    const result = await pool.query(query, params);
+
+    res.json({
+      success: true,
+      transactions: result.rows,
+      count: result.rows.length
+    });
+  } catch (error) {
+    console.error('Transaction search failed:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
 // Get single transaction by ID
 app.get('/api/transactions/:id', async (req, res) => {
   try {
@@ -3022,6 +3124,395 @@ app.get('/api/analytics/vendor-scores', async (req, res) => {
   }
 });
 
+// Performance dashboard (sync history + reliability)
+app.get('/api/dashboard/performance', async (req, res) => {
+  try {
+    const config = loadConfig();
+    const companyGuid = config?.company?.guid;
+
+    if (!companyGuid) {
+      return res.json({ success: false, error: 'Company not configured. Please run setup first.' });
+    }
+
+    const [syncHistory, stats] = await Promise.all([
+      pool.query(`
+        SELECT 
+          data_type,
+          last_sync_at,
+          records_synced,
+          sync_duration_ms,
+          sync_mode,
+          EXTRACT(EPOCH FROM (NOW() - last_sync_at)) / 3600 as hours_ago
+        FROM sync_history
+        WHERE company_guid = $1
+        ORDER BY last_sync_at DESC
+        LIMIT 30
+      `, [companyGuid]),
+      pool.query(`
+        SELECT 
+          data_type,
+          COUNT(*) as total_syncs,
+          AVG(sync_duration_ms) as avg_duration,
+          AVG(records_synced) as avg_records,
+          SUM(CASE WHEN error_message IS NOT NULL THEN 1 ELSE 0 END) as error_count
+        FROM sync_history_log
+        WHERE company_guid = $1
+        AND sync_started_at > NOW() - INTERVAL '7 days'
+        GROUP BY data_type
+      `, [companyGuid])
+    ]);
+
+    res.json({
+      success: true,
+      history: syncHistory.rows,
+      stats: stats.rows
+    });
+  } catch (error) {
+    res.json({ success: false, error: error.message });
+  }
+});
+
+// Customer payment patterns (cycle + reliability)
+app.get('/api/analytics/payment-patterns', async (req, res) => {
+  try {
+    const config = loadConfig();
+    const companyGuid = config?.company?.guid;
+
+    if (!companyGuid) {
+      return res.json({ success: false, error: 'Company not configured. Please run setup first.' });
+    }
+
+    const patterns = await pool.query(`
+      WITH customer_payments AS (
+        SELECT 
+          party_name,
+          date,
+          amount,
+          LAG(date) OVER (PARTITION BY party_name ORDER BY date) as prev_payment_date,
+          EXTRACT(DAY FROM date - LAG(date) OVER (PARTITION BY party_name ORDER BY date)) as days_between_payments
+        FROM transactions
+        WHERE company_guid = $1
+        AND voucher_type LIKE '%Receipt%'
+        AND party_name IS NOT NULL
+        AND date > NOW() - INTERVAL '6 months'
+      )
+      SELECT 
+        party_name,
+        COUNT(*) as payment_count,
+        AVG(days_between_payments) as avg_payment_cycle,
+        STDDEV(days_between_payments) as payment_consistency,
+        MAX(date) as last_payment_date,
+        EXTRACT(DAY FROM NOW() - MAX(date)) as days_since_last_payment,
+        SUM(amount) as total_paid
+      FROM customer_payments
+      WHERE days_between_payments IS NOT NULL
+      GROUP BY party_name
+      HAVING COUNT(*) >= 2
+      ORDER BY avg_payment_cycle DESC
+      LIMIT 50
+    `, [companyGuid]);
+
+    const enriched = patterns.rows.map(p => {
+      const consistency = Number(p.payment_consistency) || 0;
+      const avgCycle = Number(p.avg_payment_cycle) || 30;
+
+      const reliabilityScore = Math.max(0, Math.min(100,
+        100 - (consistency / avgCycle * 100)
+      ));
+
+      const lastPaymentTime = p.last_payment_date
+        ? new Date(p.last_payment_date).getTime()
+        : Date.now();
+      const predictedNextPayment = new Date(
+        lastPaymentTime +
+        (avgCycle * 24 * 60 * 60 * 1000)
+      );
+
+      const daysOverdue = (Number(p.days_since_last_payment) || 0) - avgCycle;
+      const riskLevel = daysOverdue > avgCycle * 0.5 ? 'high' :
+        daysOverdue > avgCycle * 0.2 ? 'medium' : 'low';
+
+      return {
+        ...p,
+        reliability_score: Math.round(reliabilityScore),
+        predicted_next_payment: predictedNextPayment,
+        days_overdue: Math.max(0, Math.round(daysOverdue)),
+        risk_level: riskLevel
+      };
+    });
+
+    res.json({
+      success: true,
+      patterns: enriched
+    });
+  } catch (error) {
+    res.json({ success: false, error: error.message });
+  }
+});
+
+// Revenue trends + simple forecast
+app.get('/api/analytics/revenue-trends', async (req, res) => {
+  try {
+    const config = loadConfig();
+    const companyGuid = config?.company?.guid;
+
+    if (!companyGuid) {
+      return res.json({ success: false, error: 'Company not configured. Please run setup first.' });
+    }
+
+    const trends = await pool.query(`
+      WITH monthly_revenue AS (
+        SELECT 
+          DATE_TRUNC('month', date) as month,
+          SUM(CASE WHEN amount > 0 THEN amount ELSE 0 END) as revenue,
+          COUNT(DISTINCT party_name) as unique_customers,
+          COUNT(*) as transaction_count
+        FROM transactions
+        WHERE company_guid = $1
+        AND voucher_type LIKE '%Sales%'
+        AND date >= DATE_TRUNC('month', NOW() - INTERVAL '12 months')
+        GROUP BY DATE_TRUNC('month', date)
+        ORDER BY month DESC
+      )
+      SELECT 
+        month,
+        revenue,
+        unique_customers,
+        transaction_count,
+        LAG(revenue) OVER (ORDER BY month) as prev_month_revenue,
+        ((revenue - LAG(revenue) OVER (ORDER BY month)) / 
+         NULLIF(LAG(revenue) OVER (ORDER BY month), 0) * 100) as growth_rate
+      FROM monthly_revenue
+    `, [companyGuid]);
+
+    const recentRevenue = trends.rows.slice(0, 3).map(r => Number(r.revenue) || 0);
+    const avgRecent = recentRevenue.length
+      ? recentRevenue.reduce((a, b) => a + b, 0) / recentRevenue.length
+      : 0;
+
+    let growthRate = 0;
+    const forecast = [];
+
+    if (trends.rows.length) {
+      const lastMonth = trends.rows[0]?.month ? new Date(trends.rows[0].month) : new Date();
+      growthRate = Number(trends.rows[0]?.growth_rate) || 0;
+
+      for (let i = 1; i <= 3; i += 1) {
+        const forecastMonth = new Date(lastMonth);
+        forecastMonth.setMonth(forecastMonth.getMonth() + i);
+
+        forecast.push({
+          month: forecastMonth,
+          forecasted_revenue: avgRecent * (1 + (growthRate / 100))
+        });
+      }
+    }
+
+    res.json({
+      success: true,
+      trends: trends.rows,
+      forecast,
+      summary: {
+        current_month: Number(trends.rows[0]?.revenue) || 0,
+        avg_monthly: avgRecent,
+        growth_rate: growthRate
+      }
+    });
+  } catch (error) {
+    res.json({ success: false, error: error.message });
+  }
+});
+
+// Smart collection priority list
+app.get('/api/analytics/collection-priority', async (req, res) => {
+  try {
+    const config = loadConfig();
+    const companyGuid = config?.company?.guid;
+
+    if (!companyGuid) {
+      return res.json({ success: false, error: 'Company not configured. Please run setup first.' });
+    }
+
+    const priority = await pool.query(`
+      WITH customer_metrics AS (
+        SELECT 
+          c.name,
+          c.current_balance,
+          oa.total_outstanding,
+          oa.current_0_30_days,
+          oa.current_31_60_days,
+          oa.current_61_90_days,
+          oa.current_over_90_days,
+          (
+            (oa.current_over_90_days * 4) + 
+            (oa.current_61_90_days * 3) + 
+            (oa.current_31_60_days * 2) + 
+            (oa.current_0_30_days * 1)
+          ) / NULLIF(oa.total_outstanding, 0) * 100 as risk_score,
+          (
+            SELECT MAX(date) 
+            FROM transactions t 
+            WHERE t.party_name = c.name 
+            AND t.voucher_type LIKE '%Receipt%'
+          ) as last_payment_date,
+          (
+            SELECT COUNT(*) 
+            FROM transactions t 
+            WHERE t.party_name = c.name 
+            AND t.voucher_type LIKE '%Receipt%'
+            AND t.date > NOW() - INTERVAL '6 months'
+          ) as payment_count
+        FROM customers c
+        LEFT JOIN outstanding_aging oa ON oa.entity_name = c.name
+        WHERE c.company_guid = $1
+        AND c.current_balance > 0
+      )
+      SELECT 
+        name,
+        current_balance,
+        total_outstanding,
+        current_0_30_days,
+        current_31_60_days,
+        current_61_90_days,
+        current_over_90_days,
+        risk_score,
+        last_payment_date,
+        payment_count,
+        EXTRACT(DAY FROM NOW() - last_payment_date) as days_since_payment,
+        (
+          (risk_score * 0.4) + 
+          (LEAST(EXTRACT(DAY FROM NOW() - last_payment_date), 90) * 0.3) +
+          ((total_outstanding / 10000) * 0.3)
+        ) as priority_score
+      FROM customer_metrics
+      WHERE total_outstanding > 0
+      ORDER BY priority_score DESC
+      LIMIT 20
+    `, [companyGuid]);
+
+    res.json({
+      success: true,
+      priorities: priority.rows
+    });
+  } catch (error) {
+    res.json({ success: false, error: error.message });
+  }
+});
+
+// Overdue analysis summary
+app.get('/api/analytics/overdue-analysis', async (req, res) => {
+  try {
+    const config = loadConfig();
+    const companyGuid = config?.company?.guid;
+
+    if (!companyGuid) {
+      return res.json({ success: false, error: 'Company not configured. Please run setup first.' });
+    }
+
+    const analysis = await pool.query(`
+      WITH overdue_summary AS (
+        SELECT 
+          SUM(current_31_60_days + current_61_90_days + current_over_90_days) as total_overdue,
+          SUM(current_31_60_days) as overdue_30_60,
+          SUM(current_61_90_days) as overdue_60_90,
+          SUM(current_over_90_days) as overdue_90_plus,
+          COUNT(DISTINCT entity_name) as overdue_customers
+        FROM outstanding_aging
+        WHERE company_guid = $1
+        AND entity_type = 'customer'
+        AND (current_31_60_days + current_61_90_days + current_over_90_days) > 0
+      ),
+      top_overdue AS (
+        SELECT 
+          entity_name,
+          (current_31_60_days + current_61_90_days + current_over_90_days) as overdue_amount,
+          current_over_90_days,
+          current_61_90_days,
+          current_31_60_days
+        FROM outstanding_aging
+        WHERE company_guid = $1
+        AND entity_type = 'customer'
+        AND (current_31_60_days + current_61_90_days + current_over_90_days) > 0
+        ORDER BY overdue_amount DESC
+        LIMIT 10
+      )
+      SELECT 
+        json_build_object(
+          'total_overdue', os.total_overdue,
+          'overdue_30_60', os.overdue_30_60,
+          'overdue_60_90', os.overdue_60_90,
+          'overdue_90_plus', os.overdue_90_plus,
+          'overdue_customers', os.overdue_customers
+        ) as summary,
+        json_agg(to_overdue.*) as top_overdue
+      FROM overdue_summary os
+      CROSS JOIN top_overdue to_overdue
+      GROUP BY os.total_overdue, os.overdue_30_60, os.overdue_60_90, 
+               os.overdue_90_plus, os.overdue_customers
+    `, [companyGuid]);
+
+    res.json({
+      success: true,
+      data: analysis.rows[0] || { summary: {}, top_overdue: [] }
+    });
+  } catch (error) {
+    res.json({ success: false, error: error.message });
+  }
+});
+
+// Real-time aging calculation (non-materialized)
+app.get('/api/analytics/aging-realtime', async (req, res) => {
+  try {
+    const config = loadConfig();
+    const companyGuid = config?.company?.guid;
+    const requestedType = (req.query.entityType || 'customer').toLowerCase();
+    const isVendor = requestedType === 'vendor' || requestedType === 'vendors';
+    const entityType = isVendor ? 'vendor' : 'customer';
+    const amountFilter = isVendor ? 'amount < 0' : 'amount > 0';
+
+    if (!companyGuid) {
+      return res.json({ success: false, error: 'Company not configured. Please run setup first.' });
+    }
+
+    const aging = await pool.query(`
+      WITH party_transactions AS (
+        SELECT 
+          party_name,
+          date,
+          amount,
+          EXTRACT(DAY FROM NOW() - date) as days_old
+        FROM transactions
+        WHERE company_guid = $1
+        AND party_name IS NOT NULL
+        AND amount != 0
+        AND ${amountFilter}
+      )
+      SELECT 
+        party_name as entity_name,
+        '${entityType}' as entity_type,
+        SUM(ABS(amount)) as total_outstanding,
+        SUM(CASE WHEN days_old <= 30 THEN ABS(amount) ELSE 0 END) as current_0_30_days,
+        SUM(CASE WHEN days_old > 30 AND days_old <= 60 THEN ABS(amount) ELSE 0 END) as current_31_60_days,
+        SUM(CASE WHEN days_old > 60 AND days_old <= 90 THEN ABS(amount) ELSE 0 END) as current_61_90_days,
+        SUM(CASE WHEN days_old > 90 THEN ABS(amount) ELSE 0 END) as current_over_90_days,
+        NOW() as calculated_at
+      FROM party_transactions
+      GROUP BY party_name
+      HAVING SUM(ABS(amount)) > 0
+      ORDER BY total_outstanding DESC
+    `, [companyGuid]);
+
+    res.json({
+      success: true,
+      data: aging.rows,
+      calculated_at: new Date().toISOString(),
+      note: 'Real-time calculation (updated just now)'
+    });
+  } catch (error) {
+    res.json({ success: false, error: error.message });
+  }
+});
+
 // Trigger analytics calculation
 app.post('/api/analytics/calculate', async (req, res) => {
   try {
@@ -3246,12 +3737,14 @@ const server = app.listen(PORT, () => {
   console.log(`   GET  /api/customers/:id`);
   console.log(`   POST /api/sync/customers`);
   console.log(`   GET  /api/transactions`);
+  console.log(`   GET  /api/transactions/search`);
   console.log(`   GET  /api/transactions/:id`);
   console.log(`   POST /api/sync/transactions ⚡ Incremental sync support`);
   console.log(`   GET  /api/sync/history ⭐ View sync history`);
   console.log(`   GET  /api/sync/history/log ⭐ Full sync audit log`);
   console.log(`   POST /api/sync/reset ⭐ Reset sync history (force full sync)`);
   console.log(`   GET  /api/stats`);
+  console.log(`   GET  /api/dashboard/performance`);
   console.log(`   GET  /api/analytics/vendor-scores ⭐`);
   console.log(`   GET  /api/analytics/aging ⚡ Uses materialized views (292x faster!)`);
   console.log(`   GET  /api/analytics/payment-cycles ⭐`);

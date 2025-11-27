@@ -34,6 +34,21 @@ const transactionsList = document.getElementById('transactions-list');
 const agingContainer = document.getElementById('aging-container');
 const agingNameFilter = document.getElementById('aging-name-filter');
 const agingPagination = document.getElementById('aging-pagination');
+const performanceDashboard = document.getElementById('performance-dashboard');
+const revenueTrendsContainer = document.getElementById('revenue-trends');
+const collectionPriorityContainer = document.getElementById('collection-priority');
+const overdueAnalysisContainer = document.getElementById('overdue-analysis');
+const paymentPatternsContainer = document.getElementById('payment-patterns');
+const txSearchForm = document.getElementById('transaction-search-form');
+const txSearchResults = document.getElementById('transaction-search-results');
+const txPartyInput = document.getElementById('tx-party');
+const txVoucherInput = document.getElementById('tx-voucher-number');
+const txFromDateInput = document.getElementById('tx-from-date');
+const txToDateInput = document.getElementById('tx-to-date');
+const txMinAmountInput = document.getElementById('tx-min-amount');
+const txMaxAmountInput = document.getElementById('tx-max-amount');
+const txVoucherTypeInput = document.getElementById('tx-voucher-type');
+const txClearBtn = document.getElementById('tx-clear');
 const logEntries = document.getElementById('log-entries');
 const syncBtn = document.getElementById('sync-btn');
 const refreshBtn = document.getElementById('refresh-btn');
@@ -89,6 +104,7 @@ let txPageSize = 50;
 let txTotalPages = 1;
 let txTotalRecords = 0;
 let transactionsPaginated = [];
+let txSearchHasRun = false;
 
 // Performance metrics tracking
 const performanceMetrics = {
@@ -267,6 +283,14 @@ customerActivityFilter?.addEventListener('change', () => renderSalesBreakdown())
 agingNameFilter?.addEventListener('input', () => {
   agingPage = 1;
   renderAging();
+});
+txSearchForm?.addEventListener('submit', (event) => {
+  event.preventDefault();
+  runTransactionSearch();
+});
+txClearBtn?.addEventListener('click', () => {
+  txSearchForm?.reset();
+  runTransactionSearch();
 });
 
 function openAskAIModal() {
@@ -782,6 +806,360 @@ async function fetchAging() {
   }
 }
 
+async function renderPerformanceDashboard() {
+  if (!performanceDashboard) return;
+  performanceDashboard.innerHTML = '<p class="loading">Loading performance metrics...</p>';
+
+  try {
+    const { data } = await measureApiCall(`${API_URL}/dashboard/performance`);
+    if (!data.success) {
+      performanceDashboard.innerHTML = '<p class="no-data">Performance data unavailable</p>';
+      return;
+    }
+
+    const stats = data.stats || [];
+    const history = data.history || [];
+
+    const statCards = stats.length
+      ? stats.map(stat => {
+          const totalSyncs = Number(stat.total_syncs) || 0;
+          const avgDuration = stat.avg_duration ? Math.round(Number(stat.avg_duration) / 1000) : 0;
+          const avgRecords = stat.avg_records ? Math.round(Number(stat.avg_records)) : 0;
+          const successRate = totalSyncs
+            ? (((totalSyncs - (Number(stat.error_count) || 0)) / totalSyncs) * 100).toFixed(1)
+            : '0.0';
+
+          return `
+            <div class="performance-card">
+              <h4>${stat.data_type || 'Unknown'}</h4>
+              <div class="metric">
+                <span class="label">Avg Duration</span>
+                <span class="value">${avgDuration}s</span>
+              </div>
+              <div class="metric">
+                <span class="label">Avg Records</span>
+                <span class="value">${avgRecords.toLocaleString()}</span>
+              </div>
+              <div class="metric">
+                <span class="label">Success Rate</span>
+                <span class="value">${successRate}%</span>
+              </div>
+            </div>
+          `;
+        }).join('')
+      : '<p class="no-data">No sync stats yet</p>';
+
+    const historyRows = history.slice(0, 6).map(entry => {
+      const when = entry.last_sync_at ? new Date(entry.last_sync_at).toLocaleString() : '—';
+      const duration = entry.sync_duration_ms ? `${Math.round(entry.sync_duration_ms / 1000)}s` : '—';
+      const hoursAgo = typeof entry.hours_ago === 'number' ? `${entry.hours_ago.toFixed(1)}h ago` : '';
+      return `
+        <tr>
+          <td>${entry.data_type || 'Unknown'}</td>
+          <td>${when}</td>
+          <td>${duration}</td>
+          <td>${entry.sync_mode || 'N/A'}</td>
+          <td>${hoursAgo}</td>
+        </tr>
+      `;
+    }).join('');
+
+    const historyTable = historyRows
+      ? `
+        <table class="analytics-table">
+          <thead>
+            <tr>
+              <th>Data Type</th>
+              <th>Last Sync</th>
+              <th>Duration</th>
+              <th>Mode</th>
+              <th>Age</th>
+            </tr>
+          </thead>
+          <tbody>${historyRows}</tbody>
+        </table>
+      `
+      : '<p class="no-data">No recent syncs yet</p>';
+
+    performanceDashboard.innerHTML = `
+      <div class="performance-cards">${statCards}</div>
+      ${historyTable}
+    `;
+  } catch (error) {
+    console.error('Performance dashboard error:', error);
+    performanceDashboard.innerHTML = '<p class="no-data">Performance data unavailable</p>';
+  }
+}
+
+async function renderPaymentPatterns() {
+  if (!paymentPatternsContainer) return;
+  paymentPatternsContainer.innerHTML = '<p class="loading">Loading payment patterns...</p>';
+
+  try {
+    const { data } = await measureApiCall(`${API_URL}/analytics/payment-patterns`);
+    if (!data.success || !data.patterns?.length) {
+      paymentPatternsContainer.innerHTML = '<p class="no-data">No payment patterns yet</p>';
+      return;
+    }
+
+    const rows = data.patterns.map(pattern => {
+      const avgCycle = Math.round(pattern.avg_payment_cycle || 0);
+      const reliability = Math.max(0, Math.min(100, pattern.reliability_score || 0));
+      const riskClass = pattern.risk_level === 'high' ? 'risk-high' :
+        pattern.risk_level === 'medium' ? 'risk-medium' : 'risk-low';
+      const nextPayment = pattern.predicted_next_payment
+        ? new Date(pattern.predicted_next_payment).toLocaleDateString()
+        : '—';
+      const lastPayment = pattern.last_payment_date
+        ? new Date(pattern.last_payment_date).toLocaleDateString()
+        : '—';
+      const statusLabel = pattern.days_overdue > 0 ? `${pattern.days_overdue}d overdue` : 'On track';
+
+      return `
+        <tr>
+          <td><strong>${pattern.party_name}</strong></td>
+          <td>${avgCycle} days</td>
+          <td>
+            <div class="reliability-bar">
+              <div class="reliability-fill" style="width: ${reliability}%"></div>
+            </div>
+            <span>${reliability}%</span>
+          </td>
+          <td>${lastPayment}</td>
+          <td>${nextPayment}</td>
+          <td><span class="risk-badge ${riskClass}">${statusLabel}</span></td>
+        </tr>
+      `;
+    }).join('');
+
+    paymentPatternsContainer.innerHTML = `
+      <table class="analytics-table payment-patterns-table">
+        <thead>
+          <tr>
+            <th>Customer</th>
+            <th>Payment Cycle</th>
+            <th>Reliability</th>
+            <th>Last Payment</th>
+            <th>Next Expected</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+    `;
+  } catch (error) {
+    console.error('Payment patterns error:', error);
+    paymentPatternsContainer.innerHTML = '<p class="no-data">Unable to load payment patterns</p>';
+  }
+}
+
+async function renderRevenueTrends() {
+  if (!revenueTrendsContainer) return;
+  revenueTrendsContainer.innerHTML = '<p class="loading">Loading revenue trends...</p>';
+
+  try {
+    const { data } = await measureApiCall(`${API_URL}/analytics/revenue-trends`);
+    if (!data.success) {
+      revenueTrendsContainer.innerHTML = '<p class="no-data">Revenue trends unavailable</p>';
+      return;
+    }
+
+    const trends = data.trends || [];
+    const summary = data.summary || {};
+    const forecast = data.forecast || [];
+
+    const trendRows = trends.map(row => {
+      const monthLabel = row.month ? new Date(row.month).toLocaleDateString(undefined, { month: 'short', year: 'numeric' }) : 'Month';
+      const growth = typeof row.growth_rate === 'number' && isFinite(row.growth_rate)
+        ? `${row.growth_rate.toFixed(1)}%`
+        : '—';
+      return `
+        <tr>
+          <td>${monthLabel}</td>
+          <td>${formatCurrency(row.revenue || 0)}</td>
+          <td>${row.unique_customers || 0}</td>
+          <td>${row.transaction_count || 0}</td>
+          <td>${growth}</td>
+        </tr>
+      `;
+    }).join('');
+
+    const forecastCards = forecast.map(item => {
+      const label = item.month ? new Date(item.month).toLocaleDateString(undefined, { month: 'short', year: 'numeric' }) : 'Upcoming';
+      return `
+        <div class="forecast-card">
+          <span class="summary-label">${label}</span>
+          <strong>${formatCurrency(item.forecasted_revenue || 0)}</strong>
+        </div>
+      `;
+    }).join('');
+
+    revenueTrendsContainer.innerHTML = `
+      <div class="overdue-summary">
+        <div class="summary-tile">
+          <span>Current Month</span>
+          <strong>${formatCurrency(summary.current_month || 0)}</strong>
+        </div>
+        <div class="summary-tile">
+          <span>Avg Monthly</span>
+          <strong>${formatCurrency(summary.avg_monthly || 0)}</strong>
+        </div>
+        <div class="summary-tile">
+          <span>Growth Rate</span>
+          <strong class="trend-chip">${typeof summary.growth_rate === 'number' ? summary.growth_rate.toFixed(1) + '% MoM' : '—'}</strong>
+        </div>
+      </div>
+      ${trends.length ? `
+        <table class="analytics-table">
+          <thead>
+            <tr>
+              <th>Month</th>
+              <th>Revenue</th>
+              <th>Unique Customers</th>
+              <th>Transactions</th>
+              <th>Growth</th>
+            </tr>
+          </thead>
+          <tbody>${trendRows}</tbody>
+        </table>
+      ` : '<p class="no-data">No revenue data yet</p>'}
+      ${forecastCards ? `<div class="forecast-list">${forecastCards}</div>` : ''}
+    `;
+  } catch (error) {
+    console.error('Revenue trends error:', error);
+    revenueTrendsContainer.innerHTML = '<p class="no-data">Revenue trends unavailable</p>';
+  }
+}
+
+async function renderCollectionPriority() {
+  if (!collectionPriorityContainer) return;
+  collectionPriorityContainer.innerHTML = '<p class="loading">Loading priority list...</p>';
+
+  try {
+    const { data } = await measureApiCall(`${API_URL}/analytics/collection-priority`);
+    if (!data.success || !data.priorities?.length) {
+      collectionPriorityContainer.innerHTML = '<p class="no-data">No collections pending</p>';
+      return;
+    }
+
+    const rows = data.priorities.map(item => {
+      const risk = Number(item.risk_score) || 0;
+      const riskClass = risk > 70 ? 'risk-high' : risk > 40 ? 'risk-medium' : 'risk-low';
+      const daysSince = item.days_since_payment ? `${Math.round(item.days_since_payment)}d` : '—';
+      return `
+        <tr>
+          <td><strong>${item.name}</strong></td>
+          <td>${formatCurrency(item.total_outstanding || 0)}</td>
+          <td>${formatCurrency(item.current_over_90_days || 0)}</td>
+          <td>${daysSince}</td>
+          <td><span class="risk-badge ${riskClass}">${Math.round(risk)}%</span></td>
+        </tr>
+      `;
+    }).join('');
+
+    collectionPriorityContainer.innerHTML = `
+      <table class="analytics-table">
+        <thead>
+          <tr>
+            <th>Customer</th>
+            <th>Outstanding</th>
+            <th>90+ Bucket</th>
+            <th>Days Since Payment</th>
+            <th>Risk</th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+    `;
+  } catch (error) {
+    console.error('Collection priority error:', error);
+    collectionPriorityContainer.innerHTML = '<p class="no-data">Unable to load collection priorities</p>';
+  }
+}
+
+async function renderOverdueAnalysis() {
+  if (!overdueAnalysisContainer) return;
+  overdueAnalysisContainer.innerHTML = '<p class="loading">Loading overdue analysis...</p>';
+
+  try {
+    const { data } = await measureApiCall(`${API_URL}/analytics/overdue-analysis`);
+    if (!data.success) {
+      overdueAnalysisContainer.innerHTML = '<p class="no-data">Overdue analysis unavailable</p>';
+      return;
+    }
+
+    const summary = data.data?.summary || {};
+    const top = data.data?.top_overdue || [];
+
+    const summaryTiles = `
+      <div class="summary-tile">
+        <span>Total Overdue</span>
+        <strong>${formatCurrency(summary.total_overdue || 0)}</strong>
+      </div>
+      <div class="summary-tile">
+        <span>31-60 Days</span>
+        <strong>${formatCurrency(summary.overdue_30_60 || 0)}</strong>
+      </div>
+      <div class="summary-tile">
+        <span>61-90 Days</span>
+        <strong>${formatCurrency(summary.overdue_60_90 || 0)}</strong>
+      </div>
+      <div class="summary-tile">
+        <span>90+ Days</span>
+        <strong>${formatCurrency(summary.overdue_90_plus || 0)}</strong>
+      </div>
+      <div class="summary-tile">
+        <span>Customers</span>
+        <strong>${summary.overdue_customers || 0}</strong>
+      </div>
+    `;
+
+    const rows = Array.isArray(top) && top.length
+      ? top.map(item => `
+        <tr>
+          <td>${item.entity_name}</td>
+          <td>${formatCurrency(item.overdue_amount || 0)}</td>
+          <td>${formatCurrency(item.current_31_60_days || 0)}</td>
+          <td>${formatCurrency(item.current_61_90_days || 0)}</td>
+          <td>${formatCurrency(item.current_over_90_days || 0)}</td>
+        </tr>
+      `).join('')
+      : '';
+
+    overdueAnalysisContainer.innerHTML = `
+      <div class="overdue-summary">${summaryTiles}</div>
+      ${rows ? `
+        <table class="analytics-table">
+          <thead>
+            <tr>
+              <th>Customer</th>
+              <th>Overdue Total</th>
+              <th>31-60</th>
+              <th>61-90</th>
+              <th>90+</th>
+            </tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>
+      ` : '<p class="no-data">No overdue customers</p>'}
+    `;
+  } catch (error) {
+    console.error('Overdue analysis error:', error);
+    overdueAnalysisContainer.innerHTML = '<p class="no-data">Overdue analysis unavailable</p>';
+  }
+}
+
+async function loadAdvancedAnalytics() {
+  const loaders = [
+    renderPerformanceDashboard(),
+    renderRevenueTrends(),
+    renderCollectionPriority(),
+    renderOverdueAnalysis(),
+    renderPaymentPatterns()
+  ];
+  await Promise.allSettled(loaders);
+}
+
 function renderRecentTransactions() {
   if (!transactionsList) return;
 
@@ -820,6 +1198,82 @@ function renderRecentTransactions() {
   }).join('');
 
   transactionsList.innerHTML = rows;
+}
+
+async function runTransactionSearch(auto = false) {
+  if (!txSearchResults) return;
+  if (auto && txSearchHasRun) return;
+
+  const params = new URLSearchParams();
+  const addParam = (key, value) => {
+    if (value !== undefined && value !== null && value !== '') {
+      params.append(key, value);
+    }
+  };
+
+  addParam('party', txPartyInput?.value.trim());
+  addParam('voucherNumber', txVoucherInput?.value.trim());
+  addParam('fromDate', txFromDateInput?.value);
+  addParam('toDate', txToDateInput?.value);
+  addParam('minAmount', txMinAmountInput?.value);
+  addParam('maxAmount', txMaxAmountInput?.value);
+  addParam('voucherType', txVoucherTypeInput?.value.trim());
+  params.append('limit', 25);
+
+  const queryString = params.toString();
+  const url = queryString ? `${API_URL}/transactions/search?${queryString}` : `${API_URL}/transactions/search`;
+
+  txSearchResults.innerHTML = '<p class="loading">Searching transactions...</p>';
+
+  try {
+    const { data } = await measureApiCall(url);
+    if (!data.success) {
+      txSearchResults.innerHTML = '<p class="no-data">Search unavailable</p>';
+      return;
+    }
+
+    if (!data.transactions || !data.transactions.length) {
+      txSearchResults.innerHTML = '<p class="no-data">No transactions match your filters</p>';
+      return;
+    }
+
+    const rows = data.transactions.map(tx => {
+      const voucherMeta = [
+        tx.voucher_type || 'Voucher',
+        tx.voucher_number ? `#${tx.voucher_number}` : null
+      ].filter(Boolean).join(' �?� ');
+      const displayDate = tx.date ? new Date(tx.date).toLocaleDateString() : 'No date';
+      return `
+        <tr>
+          <td>${tx.party_name || 'Unnamed'}</td>
+          <td>${voucherMeta}</td>
+          <td>${formatCurrency(tx.amount)}</td>
+          <td>${displayDate}</td>
+          <td>${tx.narration || ''}</td>
+        </tr>
+      `;
+    }).join('');
+
+    txSearchResults.innerHTML = `
+      <table class="analytics-table">
+        <thead>
+          <tr>
+            <th>Party</th>
+            <th>Voucher</th>
+            <th>Amount</th>
+            <th>Date</th>
+            <th>Narration</th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+    `;
+
+    txSearchHasRun = true;
+  } catch (error) {
+    console.error('Transaction search error:', error);
+    txSearchResults.innerHTML = '<p class="no-data">Search failed. Try again.</p>';
+  }
 }
 
 function renderSalesBreakdown() {
@@ -1350,6 +1804,7 @@ async function loadDashboardData() {
     // Fetch Sales Group Summary LAST to ensure it takes precedence
     // This will overwrite any sales values set by other functions
     await fetchSalesGroupSummary();
+    await loadAdvancedAnalytics();
     
     const loadEndTime = performance.now();
     const totalLoadTime = Math.round(loadEndTime - loadStartTime);
@@ -1358,6 +1813,7 @@ async function loadDashboardData() {
     
     // Display comprehensive performance metrics
     displayPerformanceMetrics();
+    runTransactionSearch(true);
   } catch (error) {
     const loadEndTime = performance.now();
     const totalLoadTime = Math.round(loadEndTime - loadStartTime);
