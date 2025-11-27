@@ -1,5 +1,6 @@
 const express = require('express');
 const cors = require('cors');
+const compression = require('compression'); // ADD THIS LINE
 const axios = require('axios');
 const xml2js = require('xml2js');
 const fs = require('fs');
@@ -77,20 +78,20 @@ async function logSyncToHistory(companyGuid, dataType, syncStartedAt, recordsCou
 // Check if this should be a full or incremental sync
 async function shouldRunFullSync(companyGuid, dataType) {
   const lastSync = await getLastSyncTime(companyGuid, dataType);
-  
+
   if (!lastSync) {
     console.log(`📋 No previous sync found for ${dataType} - Running FULL sync`);
     return { isFullSync: true, lastSyncTime: null, reason: 'first_sync' };
   }
-  
+
   // If last sync was more than 7 days ago, run full sync for data consistency
   const daysSinceLastSync = (Date.now() - new Date(lastSync).getTime()) / (1000 * 60 * 60 * 24);
-  
+
   if (daysSinceLastSync > 7) {
     console.log(`📋 Last sync was ${Math.floor(daysSinceLastSync)} days ago - Running FULL sync for consistency`);
     return { isFullSync: true, lastSyncTime: lastSync, reason: 'stale_data' };
   }
-  
+
   console.log(`📋 Last sync: ${new Date(lastSync).toLocaleString()} - Running INCREMENTAL sync ⚡`);
   return { isFullSync: false, lastSyncTime: lastSync, reason: 'incremental' };
 }
@@ -102,7 +103,7 @@ function formatTallyDate(date, format = 'tally') {
   const year = d.getFullYear();
   const month = String(d.getMonth() + 1).padStart(2, '0');
   const day = String(d.getDate()).padStart(2, '0');
-  
+
   if (format === 'tally') {
     return `${year}${month}${day}`; // YYYYMMDD for Tally
   }
@@ -125,6 +126,23 @@ const {
 const app = express();
 app.use(cors());
 app.use(express.json());
+
+// ADD THIS SECTION - Compression middleware
+app.use(compression({
+  // Compress all responses
+  filter: (req, res) => {
+    if (req.headers['x-no-compression']) {
+      // Don't compress responses if this request header is present
+      return false;
+    }
+    // Fallback to standard compression filter
+    return compression.filter(req, res);
+  },
+  // Compression level (0-9, where 9 is best compression but slowest)
+  level: 6, // Good balance between speed and compression
+  // Only compress responses larger than this (in bytes)
+  threshold: 1024 // 1KB
+}));
 
 const TALLY_URL = process.env.TALLY_URL || 'http://localhost:9000';
 const PORT = process.env.PORT || 3000;
@@ -165,6 +183,15 @@ const extractValue = (value) => {
   return value;
 };
 
+// Format currency in Indian format (₹ with commas)
+function formatCurrency(amount) {
+  if (amount === null || amount === undefined || isNaN(amount)) return '₹0';
+  return '₹' + Math.abs(amount).toLocaleString('en-IN', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2
+  });
+}
+
 // Initialize database on startup (don't exit on error, just log it)
 initDB().catch(err => {
   console.error('⚠️ Failed to initialize database:', err.message);
@@ -194,15 +221,15 @@ async function runIncrementalSyncMigration() {
         .split(';')
         .map(s => s.trim())
         .filter(s => s.length > 0 && !s.startsWith('--'));
-      
+
       for (const statement of statements) {
         try {
           await pool.query(statement);
         } catch (err) {
           // Ignore "already exists" errors
-          if (!err.message.includes('already exists') && 
-              !err.message.includes('duplicate') &&
-              !err.message.includes('does not exist')) {
+          if (!err.message.includes('already exists') &&
+            !err.message.includes('duplicate') &&
+            !err.message.includes('does not exist')) {
             console.warn('⚠️ Incremental sync migration statement error:', err.message.substring(0, 100));
           }
         }
@@ -222,12 +249,12 @@ async function runAllMigrations() {
   }
   await runCompanyMigration();
   await runIncrementalSyncMigration();
-  
+
   // Install materialized views (auto-install on startup!)
   await installMaterializedViews();
 }
 
-runAllMigrations();
+// runAllMigrations();
 
 // =====================================================
 // MATERIALIZED VIEWS REFRESH
@@ -237,10 +264,10 @@ runAllMigrations();
 async function refreshMaterializedViews() {
   console.log('🔄 Refreshing materialized views...');
   const startTime = Date.now();
-  
+
   try {
     const result = await refreshAllViews();
-    
+
     if (result.success) {
       const duration = result.duration || (Date.now() - startTime);
       console.log(`✅ Materialized views refreshed in ${duration}ms`);
@@ -265,7 +292,7 @@ async function queryTally(xmlRequest, options = {}) {
   } = options;
 
   let lastError;
-  
+
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
       if (attempt > 1) {
@@ -287,19 +314,19 @@ async function queryTally(xmlRequest, options = {}) {
       return await parser.parseStringPromise(response.data);
     } catch (error) {
       lastError = error;
-      
+
       // Don't retry on non-timeout errors
       if (!error.message.includes('timeout') && !error.code?.includes('ECONN')) {
         console.error(`❌ Tally query error (${queryType}):`, error.message);
         throw error;
       }
-      
+
       if (attempt < retries) {
         console.warn(`⚠️  Tally timeout (${queryType}), retrying... (${attempt}/${retries})`);
       }
     }
   }
-  
+
   console.error(`❌ Tally query failed after ${retries} attempts (${queryType}):`, lastError.message);
   throw lastError;
 }
@@ -414,7 +441,7 @@ app.get('/api/test-odbc', async (req, res) => {
   try {
     console.log('🔍 Testing ODBC connection to Tally...');
     const startTime = Date.now();
-    
+
     // Try a simple request to Tally
     const testXml = `
       <ENVELOPE>
@@ -441,22 +468,22 @@ app.get('/api/test-odbc', async (req, res) => {
         </BODY>
       </ENVELOPE>
     `;
-    
+
     const response = await axios.post(TALLY_URL, testXml, {
       headers: { 'Content-Type': 'application/xml' },
       timeout: 15000 // 15 seconds for test
     });
-    
+
     const endTime = Date.now();
     const responseTime = endTime - startTime;
-    
+
     // Try to parse response
     const parser = new xml2js.Parser({ explicitArray: false });
     const result = await parser.parseStringPromise(response.data);
-    
+
     const companies = result?.ENVELOPE?.BODY?.DATA?.COLLECTION?.COMPANY;
     const companyCount = companies ? (Array.isArray(companies) ? companies.length : 1) : 0;
-    
+
     res.json({
       success: true,
       message: 'ODBC connection successful',
@@ -467,14 +494,14 @@ app.get('/api/test-odbc', async (req, res) => {
     });
   } catch (error) {
     console.error('❌ ODBC test failed:', error.message);
-    
+
     let errorDetails = {
       success: false,
       message: 'ODBC connection failed',
       tallyUrl: TALLY_URL,
       error: error.message
     };
-    
+
     if (error.code === 'ECONNREFUSED') {
       errorDetails.status = 'connection_refused';
       errorDetails.details = 'Cannot connect to Tally on port 9000. Make sure:\n1. Tally is running\n2. A company is open in Tally\n3. ODBC is enabled (F12 → Advanced Configuration → Enable ODBC Server)';
@@ -485,9 +512,19 @@ app.get('/api/test-odbc', async (req, res) => {
       errorDetails.status = 'error';
       errorDetails.details = error.message;
     }
-    
+
     res.status(500).json(errorDetails);
   }
+});
+
+// TEMPORARY: Test compression endpoint
+app.get('/api/test-compression', (req, res) => {
+  // Generate large data > 1KB
+  const data = {
+    message: 'Compression test',
+    items: Array(100).fill({ id: 1, name: 'Test Item', description: 'This is a test item to generate enough data for compression to kick in.' })
+  };
+  res.json(data);
 });
 
 // ==================== COMPANY SETUP ENDPOINTS ====================
@@ -498,7 +535,7 @@ app.get('/api/company/detect', async (req, res) => {
   try {
     console.log('🔍 Company detect endpoint called - fetching all companies');
     console.log(`📡 Connecting to Tally at: ${TALLY_URL}`);
-    
+
     const companies = await getAllCompanies();
     const responseTime = Date.now() - startTime;
 
@@ -525,7 +562,7 @@ app.get('/api/company/detect', async (req, res) => {
       message: error.message,
       stack: error.stack?.substring(0, 200)
     });
-    
+
     let errorMessage = error.message;
 
     if (error.code === 'ECONNREFUSED') {
@@ -955,7 +992,7 @@ app.get('/api/customers', async (req, res) => {
     }
 
     const result = await pool.query(query, params);
-    
+
     const response = {
       success: true,
       count: result.rows.length,
@@ -965,7 +1002,7 @@ app.get('/api/customers', async (req, res) => {
 
     // Cache for 5 minutes
     cache.set(cacheKey, response, 300000);
-    
+
     res.json(response);
   } catch (error) {
     console.error('Error fetching customers:', error);
@@ -1292,8 +1329,8 @@ app.get('/api/transactions', async (req, res) => {
     res.json(response);
   } catch (error) {
     console.error('Error fetching transactions:', error);
-    res.status(500).json({ 
-      success: false, 
+    res.status(500).json({
+      success: false,
       error: error.message,
       page: 1,
       totalPages: 0,
@@ -1307,7 +1344,7 @@ app.get('/api/transactions/metadata', async (req, res) => {
   try {
     const config = loadConfig();
     const companyGuid = config?.company?.guid;
-    
+
     if (!companyGuid) {
       return res.json({ success: false, error: 'Company not configured' });
     }
@@ -1318,7 +1355,7 @@ app.get('/api/transactions/metadata', async (req, res) => {
     );
 
     const total = parseInt(result.rows[0].total);
-    
+
     res.json({
       success: true,
       totalRecords: total,
@@ -1357,6 +1394,482 @@ app.get('/api/transactions/:id', async (req, res) => {
     res.status(500).json({ success: false, error: error.message });
   }
 });
+
+// ==================== GROUPS SYNC ====================
+
+// Sync Groups from Tally
+app.post('/api/sync/groups', async (req, res) => {
+  try {
+    console.log('🔄 Starting groups sync from Tally...');
+    const config = loadConfig();
+    const companyGuid = config?.company?.guid;
+
+    if (!companyGuid) {
+      return res.json({
+        success: false,
+        error: 'Company not configured. Please run setup first.'
+      });
+    }
+
+    // Verify Tally company
+    const tallyCompanyInfo = await getCompanyInfo();
+    if (!tallyCompanyInfo || tallyCompanyInfo.guid.toLowerCase() !== companyGuid.toLowerCase()) {
+      return res.json({
+        success: false,
+        error: 'Company mismatch. Please open the correct company in Tally.'
+      });
+    }
+
+    // XML request to fetch all groups
+    const xmlRequest = `
+      <ENVELOPE>
+        <HEADER>
+          <VERSION>1</VERSION>
+          <TALLYREQUEST>Export</TALLYREQUEST>
+          <TYPE>Collection</TYPE>
+          <ID>Group Collection</ID>
+        </HEADER>
+        <BODY>
+          <DESC>
+            <STATICVARIABLES>
+              <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+            </STATICVARIABLES>
+            <TDL>
+              <TDLMESSAGE>
+                <COLLECTION NAME="Group Collection">
+                  <TYPE>Group</TYPE>
+                  <FETCH>GUID, Name, Parent, PrimaryGroup, IsRevenue, IsExpenses</FETCH>
+                </COLLECTION>
+              </TDLMESSAGE>
+            </TDL>
+          </DESC>
+        </BODY>
+      </ENVELOPE>
+    `;
+
+    const result = await queryTally(xmlRequest, {
+      timeout: 60000,
+      retries: 2,
+      queryType: 'group_sync'
+    });
+
+    if (!result?.ENVELOPE?.BODY?.DATA?.COLLECTION?.GROUP) {
+      return res.json({
+        success: true,
+        message: 'No groups found in Tally',
+        count: 0
+      });
+    }
+
+    const groups = result.ENVELOPE.BODY.DATA.COLLECTION.GROUP;
+    const groupArray = Array.isArray(groups) ? groups : [groups];
+    console.log(`Found ${groupArray.length} groups in Tally`);
+
+    let syncedCount = 0;
+    let errors = [];
+
+    for (const group of groupArray) {
+      try {
+        const guid = extractValue(group?.GUID) || group?.GUID || '';
+        const name = extractValue(group?.NAME) || group?.NAME || '';
+        const parent = extractValue(group?.PARENT) || group?.PARENT || null;
+        const primaryGroup = extractValue(group?.PRIMARYGROUP) || group?.PRIMARYGROUP || null;
+        const isRevenue = (extractValue(group?.ISREVENUE) || group?.ISREVENUE || 'No') === 'Yes';
+        const isExpense = (extractValue(group?.ISEXPENSES) || group?.ISEXPENSES || 'No') === 'Yes';
+
+        // Check if group exists
+        const existingGroup = await pool.query(
+          'SELECT id FROM groups WHERE guid = $1 AND company_guid = $2',
+          [guid, companyGuid]
+        );
+
+        if (existingGroup.rows.length > 0) {
+          // Update existing group
+          await pool.query(
+            `UPDATE groups SET
+              name = $2,
+              parent = $3,
+              primary_group = $4,
+              is_revenue = $5,
+              is_expense = $6,
+              synced_at = NOW(),
+              updated_at = NOW()
+             WHERE guid = $1 AND company_guid = $7`,
+            [guid, name, parent, primaryGroup, isRevenue, isExpense, companyGuid]
+          );
+        } else {
+          // Insert new group
+          await pool.query(
+            `INSERT INTO groups (guid, name, parent, primary_group, is_revenue, is_expense, company_guid, synced_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())`,
+            [guid, name, parent, primaryGroup, isRevenue, isExpense, companyGuid]
+          );
+        }
+        syncedCount++;
+      } catch (err) {
+        console.error(`Error syncing group:`, err);
+        errors.push({ group: extractValue(group?.NAME) || group?.NAME, error: err.message });
+      }
+    }
+
+    console.log(`✅ Synced ${syncedCount} groups`);
+    res.json({
+      success: true,
+      message: `Successfully synced ${syncedCount} groups from Tally`,
+      count: syncedCount,
+      errors: errors.length > 0 ? errors : undefined
+    });
+  } catch (error) {
+    console.error('❌ Groups sync error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// ==================== LEDGERS SYNC ====================
+
+// Sync ALL Ledgers from Tally (not just vendors/customers)
+app.post('/api/sync/ledgers', async (req, res) => {
+  try {
+    console.log('🔄 Starting ledgers sync from Tally...');
+    const config = loadConfig();
+    const companyGuid = config?.company?.guid;
+
+    if (!companyGuid) {
+      return res.json({
+        success: false,
+        error: 'Company not configured. Please run setup first.'
+      });
+    }
+
+    // Verify Tally company
+    const tallyCompanyInfo = await getCompanyInfo();
+    if (!tallyCompanyInfo || tallyCompanyInfo.guid.toLowerCase() !== companyGuid.toLowerCase()) {
+      return res.json({
+        success: false,
+        error: 'Company mismatch. Please open the correct company in Tally.'
+      });
+    }
+
+    // XML request to fetch ALL ledgers
+    const xmlRequest = `
+      <ENVELOPE>
+        <HEADER>
+          <VERSION>1</VERSION>
+          <TALLYREQUEST>Export</TALLYREQUEST>
+          <TYPE>Collection</TYPE>
+          <ID>Ledger Collection</ID>
+        </HEADER>
+        <BODY>
+          <DESC>
+            <STATICVARIABLES>
+              <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+            </STATICVARIABLES>
+            <TDL>
+              <TDLMESSAGE>
+                <COLLECTION NAME="Ledger Collection">
+                  <TYPE>Ledger</TYPE>
+                  <FETCH>GUID, Name, Parent, OpeningBalance, ClosingBalance, IsRevenue, IsExpenses</FETCH>
+                </COLLECTION>
+              </TDLMESSAGE>
+            </TDL>
+          </DESC>
+        </BODY>
+      </ENVELOPE>
+    `;
+
+    const result = await queryTally(xmlRequest, {
+      timeout: 60000,
+      retries: 2,
+      queryType: 'ledger_sync'
+    });
+
+    if (!result?.ENVELOPE?.BODY?.DATA?.COLLECTION?.LEDGER) {
+      return res.json({
+        success: true,
+        message: 'No ledgers found in Tally',
+        count: 0
+      });
+    }
+
+    const ledgers = result.ENVELOPE.BODY.DATA.COLLECTION.LEDGER;
+    const ledgerArray = Array.isArray(ledgers) ? ledgers : [ledgers];
+    console.log(`Found ${ledgerArray.length} ledgers in Tally`);
+
+    let syncedCount = 0;
+    let errors = [];
+
+    for (const ledger of ledgerArray) {
+      try {
+        const guid = extractValue(ledger?.GUID) || ledger?.GUID || '';
+        const name = extractValue(ledger?.NAME) || ledger?.NAME || '';
+        const parent = extractValue(ledger?.PARENT) || ledger?.PARENT || '';
+        const openingBalance = parseFloat(extractValue(ledger?.OPENINGBALANCE) || ledger?.OPENINGBALANCE || 0);
+        const closingBalance = parseFloat(extractValue(ledger?.CLOSINGBALANCE) || ledger?.CLOSINGBALANCE || 0);
+        const isRevenue = (extractValue(ledger?.ISREVENUE) || ledger?.ISREVENUE || 'No') === 'Yes';
+        const isExpense = (extractValue(ledger?.ISEXPENSES) || ledger?.ISEXPENSES || 'No') === 'Yes';
+
+        // Check if ledger exists
+        const existingLedger = await pool.query(
+          'SELECT id FROM ledgers WHERE guid = $1 AND company_guid = $2',
+          [guid, companyGuid]
+        );
+
+        if (existingLedger.rows.length > 0) {
+          // Update existing ledger
+          await pool.query(
+            `UPDATE ledgers SET
+              name = $2,
+              parent_group = $3,
+              opening_balance = $4,
+              closing_balance = $5,
+              is_revenue = $6,
+              is_expense = $7,
+              synced_at = NOW(),
+              updated_at = NOW()
+             WHERE guid = $1 AND company_guid = $8`,
+            [guid, name, parent, openingBalance, closingBalance, isRevenue, isExpense, companyGuid]
+          );
+        } else {
+          // Insert new ledger
+          await pool.query(
+            `INSERT INTO ledgers (guid, name, parent_group, opening_balance, closing_balance, is_revenue, is_expense, company_guid, synced_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())`,
+            [guid, name, parent, openingBalance, closingBalance, isRevenue, isExpense, companyGuid]
+          );
+        }
+        syncedCount++;
+      } catch (err) {
+        console.error(`Error syncing ledger:`, err);
+        errors.push({ ledger: extractValue(ledger?.NAME) || ledger?.NAME, error: err.message });
+      }
+    }
+
+    console.log(`✅ Synced ${syncedCount} ledgers`);
+    res.json({
+      success: true,
+      message: `Successfully synced ${syncedCount} ledgers from Tally`,
+      count: syncedCount,
+      errors: errors.length > 0 ? errors : undefined
+    });
+  } catch (error) {
+    console.error('❌ Ledgers sync error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// ==================== SALES GROUP SUMMARY ====================
+
+// Get Sales Accounts Summary (CORRECT METHOD - Uses Group-Ledger Hierarchy)
+app.get('/api/sales/group-summary', async (req, res) => {
+  try {
+    const config = loadConfig();
+    const companyGuid = config?.company?.guid;
+
+    if (!companyGuid) {
+      return res.json({
+        success: false,
+        error: 'Company not configured. Please run setup first.'
+      });
+    }
+
+    // Get date range from query params or use default (last 7 months)
+    const { fromDate, toDate } = req.query;
+    let fromDateObj, toDateObj;
+
+    if (!fromDate || !toDate) {
+      // Default to last 7 months (similar to Tally screenshot: Apr to Nov)
+      const today = new Date();
+      toDateObj = new Date(today);
+      fromDateObj = new Date(today);
+      fromDateObj.setMonth(fromDateObj.getMonth() - 7);
+    } else {
+      fromDateObj = new Date(fromDate);
+      toDateObj = new Date(toDate);
+    }
+
+    // Format dates for database query (YYYY-MM-DD)
+    const fromDateStr = formatTallyDate(fromDateObj, 'postgres');
+    const toDateStr = formatTallyDate(toDateObj, 'postgres');
+    const fromDateTally = formatTallyDate(fromDateObj, 'tally');
+    const toDateTally = formatTallyDate(toDateObj, 'tally');
+
+    console.log(`📊 Calculating Sales Accounts for ${fromDateStr} to ${toDateStr}`);
+
+    // =====================================================
+    // CORRECT APPROACH: Use Group-Ledger Hierarchy
+    // =====================================================
+    // Step 1: Get all ledgers under "Sales Accounts" group hierarchy
+    // This uses a recursive query to get all child groups and their ledgers
+
+    const salesLedgersQuery = `
+      WITH RECURSIVE sales_groups AS (
+        -- Base: Sales Accounts group itself
+        SELECT guid, name, parent
+        FROM groups
+        WHERE name = 'Sales Accounts'
+          AND company_guid = $1
+        
+        UNION ALL
+        
+        -- Recursive: All descendant groups
+        SELECT g.guid, g.name, g.parent
+        FROM groups g
+        INNER JOIN sales_groups sg ON g.parent = sg.name
+        WHERE g.company_guid = $1
+      ),
+      sales_ledger_guids AS (
+        -- Get all ledgers under these groups
+        SELECT l.guid, l.name, l.closing_balance, l.opening_balance
+        FROM ledgers l
+        WHERE l.company_guid = $1
+          AND (
+            l.parent_group = 'Sales Accounts'
+            OR l.parent_group IN (SELECT name FROM sales_groups)
+          )
+      )
+      SELECT 
+        COALESCE(SUM(closing_balance), 0) as total_sales,
+        COALESCE(SUM(opening_balance), 0) as opening_sales,
+        COUNT(*) as ledger_count,
+        json_agg(json_build_object(
+          'name', name,
+          'balance', closing_balance
+        )) FILTER (WHERE closing_balance != 0) as ledger_breakdown
+      FROM sales_ledger_guids
+    `;
+
+    const result = await pool.query(salesLedgersQuery, [companyGuid]);
+
+    if (!result.rows || result.rows.length === 0 || !result.rows[0].ledger_count || result.rows[0].ledger_count === 0) {
+      // Fallback: Check if groups/ledgers tables exist and have data
+      const checkGroups = await pool.query('SELECT COUNT(*) as count FROM groups WHERE company_guid = $1', [companyGuid]);
+      const checkLedgers = await pool.query('SELECT COUNT(*) as count FROM ledgers WHERE company_guid = $1', [companyGuid]);
+
+      if (checkGroups.rows[0].count === 0 || checkLedgers.rows[0].count === 0) {
+        return res.json({
+          success: false,
+          error: 'No sales ledgers found. Please sync groups and ledgers first.',
+          hint: 'Run POST /api/sync/groups and POST /api/sync/ledgers',
+          data: {
+            groupName: 'Sales Accounts',
+            companyName: config?.company?.name || 'Unknown',
+            period: {
+              from: fromDateTally,
+              to: toDateTally,
+              fromFormatted: formatTallyDateForDisplay(fromDateTally),
+              toFormatted: formatTallyDateForDisplay(toDateTally)
+            },
+            closingBalance: {
+              amount: 0,
+              type: 'Credit',
+              formatted: formatCurrency(0)
+            },
+            openingBalance: {
+              amount: 0,
+              type: 'Credit',
+              formatted: formatCurrency(0)
+            }
+          }
+        });
+      }
+
+      // Groups/ledgers exist but no Sales Accounts found
+      return res.json({
+        success: false,
+        error: 'Sales Accounts group not found in synced data.',
+        hint: 'Ensure "Sales Accounts" group exists in Tally and sync again.',
+        data: {
+          groupName: 'Sales Accounts',
+          companyName: config?.company?.name || 'Unknown',
+          period: {
+            from: fromDateTally,
+            to: toDateTally,
+            fromFormatted: formatTallyDateForDisplay(fromDateTally),
+            toFormatted: formatTallyDateForDisplay(toDateTally)
+          },
+          closingBalance: {
+            amount: 0,
+            type: 'Credit',
+            formatted: formatCurrency(0)
+          },
+          openingBalance: {
+            amount: 0,
+            type: 'Credit',
+            formatted: formatCurrency(0)
+          }
+        }
+      });
+    }
+
+    const salesData = result.rows[0];
+    const totalSales = parseFloat(salesData.total_sales) || 0;
+    const openingSales = parseFloat(salesData.opening_sales) || 0;
+    const ledgerCount = parseInt(salesData.ledger_count) || 0;
+    const breakdown = salesData.ledger_breakdown || [];
+
+    console.log(`✅ Total Sales: ₹${totalSales.toLocaleString('en-IN')}`);
+    console.log(`   Calculated from ${ledgerCount} sales ledgers`);
+    console.log(`   Opening Balance: ₹${openingSales.toLocaleString('en-IN')}`);
+
+    res.json({
+      success: true,
+      data: {
+        groupName: 'Sales Accounts',
+        companyName: config?.company?.name || 'Unknown',
+        period: {
+          from: fromDateTally,
+          to: toDateTally,
+          fromFormatted: formatTallyDateForDisplay(fromDateTally),
+          toFormatted: formatTallyDateForDisplay(toDateTally)
+        },
+        closingBalance: {
+          amount: totalSales,
+          type: 'Credit',
+          formatted: formatCurrency(totalSales)
+        },
+        openingBalance: {
+          amount: openingSales,
+          type: 'Credit',
+          formatted: formatCurrency(openingSales)
+        },
+        ledgerCount: ledgerCount,
+        breakdown: breakdown,
+        calculation_method: 'group_hierarchy',
+        notes: 'Calculated from Sales Accounts group and all its sub-groups'
+      }
+    });
+  } catch (error) {
+    console.error('Error calculating Sales Group Summary:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message,
+      details: 'Error calculating sales from synced transactions'
+    });
+  }
+});
+
+// Helper function to format Tally date for display (converts YYYYMMDD to readable format)
+function formatTallyDateForDisplay(tallyDate) {
+  if (!tallyDate) return '';
+  // Tally date format: YYYYMMDD or YYYY-MM-DD
+  let dateStr = tallyDate.toString();
+  if (dateStr.length === 8 && !dateStr.includes('-')) {
+    // YYYYMMDD format
+    const year = dateStr.substring(0, 4);
+    const month = dateStr.substring(4, 6);
+    const day = dateStr.substring(6, 8);
+    const date = new Date(`${year}-${month}-${day}`);
+    return date.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' });
+  }
+  // Try parsing as is
+  try {
+    const date = new Date(dateStr);
+    return date.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' });
+  } catch {
+    return dateStr;
+  }
+}
+
 
 // Sync transactions from Tally to PostgreSQL
 app.post('/api/sync/transactions', async (req, res) => {
@@ -1409,7 +1922,7 @@ app.post('/api/sync/transactions', async (req, res) => {
 
     // Check if we should run incremental or full sync
     const syncDecision = await shouldRunFullSync(companyGuid, 'transactions');
-    
+
     if (forceFullSync) {
       // User requested full sync
       syncMode = 'full';
@@ -1473,10 +1986,10 @@ app.post('/api/sync/transactions', async (req, res) => {
     // Initial Tally API call: 15 minute timeout to detect if Tally is dead/unresponsive
     // If Tally is responding and data is coming, we'll get the data within this time
     // If Tally is completely dead, we'll error out after 15 minutes instead of waiting forever
-    const result = await queryTally(xmlRequest, { 
+    const result = await queryTally(xmlRequest, {
       timeout: 900000, // 15 minutes - enough for very large datasets, but detects if Tally is dead
       retries: 3, // Retry 3 times if connection fails
-      queryType: 'transaction_sync' 
+      queryType: 'transaction_sync'
     });
 
     if (!result?.ENVELOPE?.BODY?.DATA?.COLLECTION?.VOUCHER) {
@@ -1500,7 +2013,7 @@ app.post('/api/sync/transactions', async (req, res) => {
     const BATCH_SIZE = 50; // Process 50 at a time to avoid memory issues
     const totalBatches = Math.ceil(voucherArray.length / BATCH_SIZE);
     const failedBatches = []; // Track batches that failed for retry later
-    
+
     // Initialize progress tracking
     updateProgress('transaction', {
       inProgress: true,
@@ -1509,15 +2022,15 @@ app.post('/api/sync/transactions', async (req, res) => {
       startTime: Date.now(),
       totalBatches
     });
-    
+
     console.log(`🔄 Starting batch processing: ${totalBatches} batches of ${BATCH_SIZE} transactions each`);
     console.log(`⏱️  NO TIMEOUT - Sync will continue until all ${totalTransactions} transactions are processed`);
     console.log(`📊 Progress tracking: Will monitor batch completion to ensure data is flowing`);
     console.log(`🔄 Retry logic: Failed batches will be retried after all other batches complete`);
-    
+
     let lastBatchCompletionTime = Date.now();
     const STUCK_THRESHOLD = 600000; // 10 minutes - if no batch completes in 10 min, something is wrong
-    
+
     // Process in batches - NO TIMEOUT, continues until all batches complete
     // But monitors if batches are actually completing (data is flowing)
     for (let i = 0; i < voucherArray.length; i += BATCH_SIZE) {
@@ -1526,14 +2039,14 @@ app.post('/api/sync/transactions', async (req, res) => {
       const batchNum = Math.floor(i / BATCH_SIZE) + 1;
       const totalBatches = Math.ceil(voucherArray.length / BATCH_SIZE);
       const percentage = Math.round((i / voucherArray.length) * 100);
-      
+
       console.log(`📦 Processing batch ${batchNum}/${totalBatches} (${percentage}% complete) - ${batch.length} transactions`);
-      
+
       // Prepare bulk upsert using VALUES
       const values = [];
       const placeholders = [];
       let paramIndex = 1;
-      
+
       for (const voucher of batch) {
         try {
           const guid = voucher.GUID?._ || voucher.GUID;
@@ -1556,7 +2069,7 @@ app.post('/api/sync/transactions', async (req, res) => {
             `($${paramIndex}, $${paramIndex + 1}, $${paramIndex + 2}, $${paramIndex + 3}, $${paramIndex + 4}, $${paramIndex + 5}, $${paramIndex + 6}, $${paramIndex + 7}, $${paramIndex + 8}, $${paramIndex + 9}, $${paramIndex + 10}, NOW())`
           );
           values.push(
-            guid, voucherNumber, voucherType, businessId, companyGuid, 
+            guid, voucherNumber, voucherType, businessId, companyGuid,
             itemName, itemCode, formattedDate, partyName, amount, narration
           );
           paramIndex += 11;
@@ -1568,7 +2081,7 @@ app.post('/api/sync/transactions', async (req, res) => {
           });
         }
       }
-      
+
       // Execute bulk upsert for this batch
       if (values.length > 0) {
         try {
@@ -1592,31 +2105,31 @@ app.post('/api/sync/transactions', async (req, res) => {
               synced_at = NOW(),
               updated_at = NOW()
           `;
-          
+
           await pool.query(query, values);
           syncedCount += batch.length;
-          
+
           const batchDuration = Date.now() - batchStartTime;
           lastBatchCompletionTime = Date.now(); // Update last completion time
-          
+
           // Check if batch took unusually long (warn but continue)
           if (batchDuration > 300000) { // 5 minutes per batch is unusually slow
             console.warn(`⚠️  Batch ${batchNum} took ${Math.round(batchDuration / 1000)}s (${Math.round(batchDuration / 60000)}min) - this is slow but continuing...`);
           }
-          
+
           // Update progress
           updateProgress('transaction', {
             current: syncedCount,
             currentBatch: batchNum
           });
-          
+
           console.log(`✅ Batch ${batchNum}/${totalBatches} completed in ${Math.round(batchDuration / 1000)}s - ${syncedCount}/${totalTransactions} synced (${getProgress('transaction').percentage}%)`);
-          
+
           // Clear memory between batches
           if (global.gc) {
             global.gc();
           }
-          
+
           // Safety check: If we've been stuck (no batch completion for extended period), error out
           // This should never happen in normal flow, but protects against infinite loops
           const timeSinceLastCompletion = Date.now() - lastBatchCompletionTime;
@@ -1625,7 +2138,7 @@ app.post('/api/sync/transactions', async (req, res) => {
           }
         } catch (err) {
           console.error(`❌ Error in batch ${batchNum}:`, err.message);
-          
+
           // Store failed batch for retry later (don't add to errors yet - will retry)
           failedBatches.push({
             batchNum,
@@ -1635,7 +2148,7 @@ app.post('/api/sync/transactions', async (req, res) => {
             error: err.message,
             attempt: 1
           });
-          
+
           // If database connection error, wait a bit before next batch
           if (err.message.includes('timeout') || err.message.includes('connection') || err.message.includes('ECONN')) {
             console.warn(`⚠️  Database connection issue in batch ${batchNum} - will retry after all batches complete`);
@@ -1643,21 +2156,21 @@ app.post('/api/sync/transactions', async (req, res) => {
           } else {
             console.warn(`⚠️  Batch ${batchNum} failed (${err.message}) - will retry after all batches complete`);
           }
-          
+
           // Don't add to errors array yet - we'll retry after all batches are done
           // Only add to errors if retry also fails
         }
       }
     }
-    
+
     // Retry failed batches after all other batches are done
     if (failedBatches.length > 0) {
       console.log(`\n🔄 Retrying ${failedBatches.length} failed batch(es) after all other batches completed...`);
-      
+
       for (const failedBatch of failedBatches) {
         const { batchNum, batch, values, placeholders, error: originalError, attempt } = failedBatch;
         console.log(`🔄 Retrying batch ${batchNum} (attempt ${attempt + 1})...`);
-        
+
         try {
           const query = `
             INSERT INTO transactions (
@@ -1679,18 +2192,18 @@ app.post('/api/sync/transactions', async (req, res) => {
               synced_at = NOW(),
               updated_at = NOW()
           `;
-          
+
           await pool.query(query, values);
           syncedCount += batch.length;
-          
+
           console.log(`✅ Batch ${batchNum} retry successful - ${batch.length} transactions synced`);
-          
+
           // Update progress
           updateProgress('transaction', {
             current: syncedCount,
             currentBatch: batchNum
           });
-          
+
           // Remove from failed batches (successfully retried)
           const index = failedBatches.indexOf(failedBatch);
           if (index > -1) {
@@ -1698,7 +2211,7 @@ app.post('/api/sync/transactions', async (req, res) => {
           }
         } catch (retryError) {
           console.error(`❌ Batch ${batchNum} retry failed:`, retryError.message);
-          
+
           // Track final error
           errors.push({
             batch: batchNum,
@@ -1706,14 +2219,14 @@ app.post('/api/sync/transactions', async (req, res) => {
             originalError: originalError,
             attempts: attempt + 1
           });
-          
+
           // If connection error, wait before next retry
           if (retryError.message.includes('timeout') || retryError.message.includes('connection') || retryError.message.includes('ECONN')) {
             await new Promise(resolve => setTimeout(resolve, 3000)); // Wait 3s for retries
           }
         }
       }
-      
+
       if (failedBatches.length === 0) {
         console.log(`✅ All failed batches retried successfully!`);
       } else {
@@ -1735,16 +2248,16 @@ app.post('/api/sync/transactions', async (req, res) => {
     // UPDATE SYNC HISTORY (for incremental sync tracking)
     // =====================================================
     await updateSyncHistory(
-      companyGuid, 
-      'transactions', 
-      syncedCount, 
-      syncDuration, 
+      companyGuid,
+      'transactions',
+      syncedCount,
+      syncDuration,
       syncMode,
       fromDate,
       toDate,
       errors.length > 0 ? `${errors.length} errors during sync` : null
     );
-    
+
     // Log to sync history for full audit trail
     await logSyncToHistory(
       companyGuid,
@@ -1785,7 +2298,7 @@ app.post('/api/sync/transactions', async (req, res) => {
   } catch (error) {
     const syncDuration = Date.now() - (typeof syncStartTime !== 'undefined' ? syncStartTime : Date.now());
     console.error('Transaction sync error:', error);
-    
+
     // Log failed sync to history
     const config = loadConfig();
     if (config?.company?.guid) {
@@ -1801,7 +2314,7 @@ app.post('/api/sync/transactions', async (req, res) => {
         error.message
       );
     }
-    
+
     res.status(500).json({
       success: false,
       error: error.message,
@@ -1824,13 +2337,13 @@ app.get('/api/sync/history', async (req, res) => {
   try {
     const config = loadConfig();
     const companyGuid = config?.company?.guid;
-    
+
     if (!companyGuid) {
       return res.json({ success: false, error: 'Company not configured' });
     }
-    
+
     const { dataType, limit = 50 } = req.query;
-    
+
     let query = `
       SELECT 
         id,
@@ -1847,17 +2360,17 @@ app.get('/api/sync/history', async (req, res) => {
       WHERE company_guid = $1
     `;
     const params = [companyGuid];
-    
+
     if (dataType) {
       query += ` AND data_type = $2`;
       params.push(dataType);
     }
-    
+
     query += ` ORDER BY last_sync_at DESC LIMIT $${params.length + 1}`;
     params.push(parseInt(limit));
-    
+
     const result = await pool.query(query, params);
-    
+
     // Also get last sync times per data type
     const lastSyncTimes = await pool.query(`
       SELECT 
@@ -1870,7 +2383,7 @@ app.get('/api/sync/history', async (req, res) => {
       WHERE company_guid = $1
       ORDER BY data_type
     `, [companyGuid]);
-    
+
     res.json({
       success: true,
       history: result.rows,
@@ -1896,30 +2409,30 @@ app.get('/api/sync/history/log', async (req, res) => {
   try {
     const config = loadConfig();
     const companyGuid = config?.company?.guid;
-    
+
     if (!companyGuid) {
       return res.json({ success: false, error: 'Company not configured' });
     }
-    
+
     const { dataType, limit = 100 } = req.query;
-    
+
     let query = `
       SELECT *
       FROM sync_history_log
       WHERE company_guid = $1
     `;
     const params = [companyGuid];
-    
+
     if (dataType) {
       query += ` AND data_type = $2`;
       params.push(dataType);
     }
-    
+
     query += ` ORDER BY sync_started_at DESC LIMIT $${params.length + 1}`;
     params.push(parseInt(limit));
-    
+
     const result = await pool.query(query, params);
-    
+
     res.json({
       success: true,
       log: result.rows,
@@ -1936,13 +2449,13 @@ app.post('/api/sync/reset', async (req, res) => {
   try {
     const config = loadConfig();
     const companyGuid = config?.company?.guid;
-    
+
     if (!companyGuid) {
       return res.json({ success: false, error: 'Company not configured' });
     }
-    
+
     const { dataType } = req.body;
-    
+
     if (dataType) {
       // Reset specific data type
       await pool.query(
@@ -1958,10 +2471,10 @@ app.post('/api/sync/reset', async (req, res) => {
       );
       console.log(`🔄 Reset all sync history for company ${companyGuid}`);
     }
-    
+
     res.json({
       success: true,
-      message: dataType 
+      message: dataType
         ? `Sync history reset for ${dataType}. Next sync will be a full sync.`
         : 'All sync history reset. Next syncs will be full syncs.'
     });
@@ -2060,7 +2573,7 @@ app.get('/api/stats', async (req, res) => {
     let business = null;
     const businessCacheKey = `business:${companyGuid}`;
     let businessMeta = cache.get(businessCacheKey);
-    
+
     if (!businessMeta) {
       try {
         // Try to get REMOTECMPID from Tally, but always use company GUID as primary ID
@@ -2072,13 +2585,13 @@ app.get('/api/stats', async (req, res) => {
         businessMeta = null;
       }
     }
-    
+
     if (businessMeta) {
       // Use REMOTECMPID if available and matches, otherwise use company GUID
-      const businessId = businessMeta.id && businessMeta.id !== DEFAULT_BUSINESS_ID 
+      const businessId = businessMeta.id && businessMeta.id !== DEFAULT_BUSINESS_ID
         ? businessMeta.id  // Use REMOTECMPID if available
         : companyGuid;     // Fallback to company GUID
-      
+
       business = {
         id: businessId,
         name: businessMeta.name || companyName
@@ -2182,10 +2695,10 @@ app.get('/api/analytics/aging', async (req, res) => {
     if (useMaterializedView) {
       try {
         const viewsExist = await checkMaterializedViewsExist();
-        
+
         if (viewsExist) {
           const startTime = Date.now();
-          
+
           const [vendorResult, customerResult] = await Promise.all([
             // Vendors (payables) from materialized view
             pool.query(`
@@ -2206,7 +2719,7 @@ app.get('/api/analytics/aging', async (req, res) => {
               WHERE company_guid = $1
               ORDER BY total_outstanding DESC
             `, [companyGuid]),
-            
+
             // Customers (receivables) from materialized view
             pool.query(`
               SELECT 
@@ -2229,7 +2742,7 @@ app.get('/api/analytics/aging', async (req, res) => {
           ]);
 
           const queryTime = Date.now() - startTime;
-          
+
           // Combine and sort
           const allRows = [
             ...vendorResult.rows.map(r => ({ ...r, vendor_id: r.id, customer_id: null })),
@@ -2273,11 +2786,11 @@ app.get('/api/analytics/aging', async (req, res) => {
 
     const lastSync = lastSyncCheck.rows[0]?.last_sync;
     const cachedAging = cache.get(`aging:meta:${companyGuid}`);
-    
+
     // Only recalculate if data changed or cache expired
-    const needsRecalculation = !cachedAging || 
-      !cachedAging.lastSync || 
-      !lastSync || 
+    const needsRecalculation = !cachedAging ||
+      !cachedAging.lastSync ||
+      !lastSync ||
       new Date(lastSync) > new Date(cachedAging.lastSync);
 
     if (needsRecalculation || forceRefresh) {
@@ -2399,13 +2912,13 @@ app.get('/api/test/materialized-views', async (req, res) => {
   try {
     const config = loadConfig();
     const companyGuid = config?.company?.guid;
-    
+
     if (!companyGuid) {
       return res.json({ success: false, error: 'Company not configured' });
     }
-    
+
     const results = {};
-    
+
     // Test 1: Regular query (legacy)
     const startLegacy = Date.now();
     await pool.query(`
@@ -2417,7 +2930,7 @@ app.get('/api/test/materialized-views', async (req, res) => {
       LIMIT 100
     `, [companyGuid]);
     results.legacyQuery = Date.now() - startLegacy;
-    
+
     // Test 2: Materialized view query
     const startMV = Date.now();
     try {
@@ -2432,7 +2945,7 @@ app.get('/api/test/materialized-views', async (req, res) => {
       results.materializedView = null;
       results.materializedViewError = mvErr.message;
     }
-    
+
     // Test 3: Refresh time
     const startRefresh = Date.now();
     try {
@@ -2442,16 +2955,16 @@ app.get('/api/test/materialized-views', async (req, res) => {
       results.refreshTime = null;
       results.refreshError = refreshErr.message;
     }
-    
+
     // Calculate improvement
     if (results.materializedView && results.legacyQuery) {
       const improvement = Math.round(results.legacyQuery / results.materializedView);
       results.improvement = `${improvement}x faster`;
     }
-    
+
     // Check if views exist
     const viewsExist = await checkMaterializedViewsExist();
-    
+
     res.json({
       success: true,
       viewsInstalled: viewsExist,
@@ -2461,9 +2974,9 @@ app.get('/api/test/materialized-views', async (req, res) => {
         refreshTime: results.refreshTime ? `${results.refreshTime}ms` : results.refreshError || 'N/A',
         improvement: results.improvement || 'N/A'
       },
-      recommendation: results.materializedView && results.materializedView < 50 
+      recommendation: results.materializedView && results.materializedView < 50
         ? '✅ Materialized views are working perfectly!'
-        : results.materializedView 
+        : results.materializedView
           ? '⚠️ Consider adding more indexes or checking data volume'
           : '❌ Materialized views not installed. Restart server to auto-install.'
     });
@@ -2529,10 +3042,10 @@ app.post('/api/analytics/calculate', async (req, res) => {
     await calculateVendorSettlementCycles(companyGuid);
     await calculateOutstandingAging(companyGuid);
     await calculateVendorScores(companyGuid);
-    
+
     // ⚡ Refresh materialized views for fast queries
     const refreshResult = await refreshMaterializedViews();
-    
+
     const analyticsDuration = Date.now() - analyticsStart;
 
     res.json({
@@ -2577,7 +3090,7 @@ const autoSyncStatus = {
 app.get('/api/sync/auto-status', (req, res) => {
   const lastSyncTime = autoSyncStatus.lastCompleted || autoSyncStatus.lastManualSyncCompleted;
   const timeSinceLastSync = lastSyncTime ? Date.now() - new Date(lastSyncTime).getTime() : SYNC_INTERVAL;
-  
+
   res.json({
     success: true,
     autoSync: {
@@ -2615,23 +3128,23 @@ async function autoSync() {
     console.log('⚠️ Auto-sync already in progress, skipping...');
     return;
   }
-  
+
   // Skip if manual sync is in progress
   if (autoSyncStatus.manualSyncInProgress) {
     console.log('⏸️ Manual sync in progress - skipping auto-sync');
     return;
   }
-  
+
   // Skip if a sync (manual or auto) happened recently (within MIN_SYNC_GAP)
-  const lastSyncTime = autoSyncStatus.lastManualSyncCompleted 
+  const lastSyncTime = autoSyncStatus.lastManualSyncCompleted
     ? Math.max(
-        new Date(autoSyncStatus.lastCompleted || 0).getTime(),
-        new Date(autoSyncStatus.lastManualSyncCompleted).getTime()
-      )
+      new Date(autoSyncStatus.lastCompleted || 0).getTime(),
+      new Date(autoSyncStatus.lastManualSyncCompleted).getTime()
+    )
     : (autoSyncStatus.lastCompleted ? new Date(autoSyncStatus.lastCompleted).getTime() : 0);
-    
+
   const timeSinceLastSync = Date.now() - lastSyncTime;
-  
+
   if (lastSyncTime > 0 && timeSinceLastSync < MIN_SYNC_GAP) {
     const waitTime = Math.ceil((MIN_SYNC_GAP - timeSinceLastSync) / 1000);
     console.log(`⏸️ Recent sync detected - waiting ${waitTime}s before next auto-sync`);
@@ -2649,19 +3162,24 @@ async function autoSync() {
   console.log(`⏰ Time: ${new Date().toLocaleString()}`);
 
   try {
-    // Sync vendors
-    autoSyncStatus.currentStep = 'vendors';
-    console.log('📦 Syncing vendors...');
-    const vendorResponse = await axios.post(`http://localhost:${PORT}/api/sync/vendors`);
-    autoSyncStatus.results.vendors = { count: vendorResponse.data.count, success: true };
-    console.log(`✅ Vendors: ${vendorResponse.data.count} synced`);
+    // Sync vendors and customers in PARALLEL
+    autoSyncStatus.currentStep = 'vendors_customers';
+    console.log('🚀 Phase 1: Syncing vendors and customers in parallel...');
+    const phase1Start = Date.now();
 
-    // Sync customers
-    autoSyncStatus.currentStep = 'customers';
-    console.log('👥 Syncing customers...');
-    const customerResponse = await axios.post(`http://localhost:${PORT}/api/sync/customers`);
+    const [vendorResponse, customerResponse] = await Promise.all([
+      axios.post(`http://localhost:${PORT}/api/sync/vendors`),
+      axios.post(`http://localhost:${PORT}/api/sync/customers`)
+    ]);
+
+    const phase1Duration = Date.now() - phase1Start;
+    console.log(`✅ Phase 1 completed in ${phase1Duration}ms`);
+
+    autoSyncStatus.results.vendors = { count: vendorResponse.data.count, success: true };
     autoSyncStatus.results.customers = { count: customerResponse.data.count, success: true };
-    console.log(`✅ Customers: ${customerResponse.data.count} synced`);
+
+    console.log(`   Vendors: ${vendorResponse.data.count} synced`);
+    console.log(`   Customers: ${customerResponse.data.count} synced`);
 
     // Sync transactions (incremental or full based on last sync)
     autoSyncStatus.currentStep = 'transactions';
@@ -2669,11 +3187,11 @@ async function autoSync() {
     const transactionResponse = await axios.post(`http://localhost:${PORT}/api/sync/transactions`, {});
     const txData = transactionResponse.data;
     const modeEmoji = txData.syncMode === 'incremental' ? '⚡' : '📦';
-    autoSyncStatus.results.transactions = { 
-      count: txData.count, 
+    autoSyncStatus.results.transactions = {
+      count: txData.count,
       mode: txData.syncMode || 'full',
       duration: txData.duration,
-      success: true 
+      success: true
     };
     console.log(`✅ Transactions: ${txData.count} synced ${modeEmoji} (${txData.syncMode || 'full'} mode) ${txData.duration || ''}`);
 
@@ -2687,7 +3205,7 @@ async function autoSync() {
     const totalDuration = Date.now() - syncStartTime;
     autoSyncStatus.lastDuration = totalDuration;
     autoSyncStatus.lastCompleted = new Date().toISOString();
-    
+
     console.log(`🎉 ===== AUTO-SYNC COMPLETED in ${Math.round(totalDuration / 1000)}s =====\n`);
   } catch (error) {
     console.error('❌ Auto-sync failed:', error.message);
@@ -2743,11 +3261,11 @@ const server = app.listen(PORT, () => {
   console.log(`🔄 First sync in 10 seconds...\n`);
 
   // Run first sync after 10 seconds
-  setTimeout(() => {
-    autoSync();
-    // Then run every 5 minutes
-    syncInterval = setInterval(autoSync, SYNC_INTERVAL);
-  }, 10000);
+  // setTimeout(() => {
+  //   autoSync();
+  //   // Then run every 5 minutes
+  //   syncInterval = setInterval(autoSync, SYNC_INTERVAL);
+  // }, 10000);
 }).on('error', (err) => {
   if (err.code === 'EADDRINUSE') {
     console.error(`\n❌ ERROR: Port ${PORT} is already in use!`);

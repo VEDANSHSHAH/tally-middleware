@@ -150,6 +150,67 @@ const initDB = async () => {
     `);
     console.log('✅ Transactions table initialized');
 
+    // Create groups table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS groups (
+        id SERIAL PRIMARY KEY,
+        guid VARCHAR(255) NOT NULL,
+        name VARCHAR(500) NOT NULL,
+        parent VARCHAR(500),
+        primary_group VARCHAR(100),
+        is_revenue BOOLEAN DEFAULT FALSE,
+        is_expense BOOLEAN DEFAULT FALSE,
+        company_guid VARCHAR(255) NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        synced_at TIMESTAMP,
+        CONSTRAINT groups_guid_company_key UNIQUE(guid, company_guid)
+      );
+    `);
+    await pool.query(`
+      CREATE INDEX IF NOT EXISTS idx_groups_company ON groups(company_guid);
+      CREATE INDEX IF NOT EXISTS idx_groups_parent ON groups(parent);
+      CREATE INDEX IF NOT EXISTS idx_groups_primary ON groups(primary_group);
+      CREATE INDEX IF NOT EXISTS idx_groups_name ON groups(name);
+    `);
+    console.log('✅ Groups table initialized');
+
+    // Create ledgers table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS ledgers (
+        id SERIAL PRIMARY KEY,
+        guid VARCHAR(255) NOT NULL,
+        name VARCHAR(500) NOT NULL,
+        parent_group VARCHAR(500) NOT NULL,
+        opening_balance NUMERIC(15,2) DEFAULT 0,
+        closing_balance NUMERIC(15,2) DEFAULT 0,
+        ledger_type VARCHAR(100),
+        is_revenue BOOLEAN DEFAULT FALSE,
+        is_expense BOOLEAN DEFAULT FALSE,
+        company_guid VARCHAR(255) NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        synced_at TIMESTAMP,
+        CONSTRAINT ledgers_guid_company_key UNIQUE(guid, company_guid)
+      );
+    `);
+    await pool.query(`
+      CREATE INDEX IF NOT EXISTS idx_ledgers_company ON ledgers(company_guid);
+      CREATE INDEX IF NOT EXISTS idx_ledgers_parent ON ledgers(parent_group);
+      CREATE INDEX IF NOT EXISTS idx_ledgers_revenue ON ledgers(is_revenue) WHERE is_revenue = TRUE;
+      CREATE INDEX IF NOT EXISTS idx_ledgers_name ON ledgers(name);
+    `);
+    console.log('✅ Ledgers table initialized');
+
+    // Add company_guid to transactions if it doesn't exist
+    await pool.query(`
+      ALTER TABLE transactions
+      ADD COLUMN IF NOT EXISTS company_guid VARCHAR(255);
+    `);
+    await pool.query(`
+      CREATE INDEX IF NOT EXISTS idx_transactions_company ON transactions(company_guid);
+    `);
+
     // Create companies table
     await pool.query(`
       CREATE TABLE IF NOT EXISTS companies (
