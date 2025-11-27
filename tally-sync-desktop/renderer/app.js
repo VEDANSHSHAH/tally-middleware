@@ -238,6 +238,51 @@ function formatCurrency(amount) {
   }).format(normalizedAmount);
 }
 
+// Safe number formatting with Indian locale (optionally without symbol)
+function formatINR(amount, showSymbol = true) {
+  if (amount === null || amount === undefined || isNaN(amount)) {
+    return showSymbol ? '₹0' : '0';
+  }
+  const formatted = new Intl.NumberFormat('en-IN', {
+    maximumFractionDigits: 0
+  }).format(Math.abs(amount));
+  if (showSymbol) {
+    return amount < 0 ? `-₹${formatted}` : `₹${formatted}`;
+  }
+  return amount < 0 ? `-${formatted}` : formatted;
+}
+
+// Safe date formatting helper
+function formatDateSafe(dateStr, format = 'short') {
+  if (!dateStr) return '-';
+  try {
+    const date = new Date(dateStr);
+    if (isNaN(date.getTime())) return '-';
+    const options = format === 'short'
+      ? { day: 'numeric', month: 'short', year: 'numeric' }
+      : { day: 'numeric', month: 'long', year: 'numeric' };
+    return date.toLocaleDateString('en-IN', options);
+  } catch (e) {
+    return '-';
+  }
+}
+
+// Safe text fallback
+function safeText(value, fallback = '-') {
+  if (value === null || value === undefined || value === '') {
+    return fallback;
+  }
+  return String(value);
+}
+
+// Safe percentage formatting
+function formatPercent(value, decimals = 1) {
+  if (value === null || value === undefined || isNaN(value)) {
+    return '0%';
+  }
+  return `${Number(value).toFixed(decimals)}%`;
+}
+
 function formatBytes(bytes) {
   if (bytes === 0) return '0 B';
   const k = 1024;
@@ -1185,13 +1230,13 @@ function renderRecentTransactions() {
     return `
       <div class="transaction-row">
         <div>
-          <strong>${title}</strong>
-          <p class="transaction-meta">${voucherMeta || 'Voucher'}</p>
+          <strong>${safeText(title)}</strong>
+          <p class="transaction-meta">${safeText(voucherMeta || 'Voucher')}</p>
           ${itemMeta}
         </div>
         <div class="transaction-right">
           <span class="transaction-amount">${formatCurrency(tx.amount)}</span>
-          <span class="transaction-date">${displayDate}</span>
+          <span class="transaction-date">${formatDateSafe(tx.date)}</span>
         </div>
       </div>
     `;
@@ -1211,14 +1256,37 @@ async function runTransactionSearch(auto = false) {
     }
   };
 
-  addParam('party', txPartyInput?.value.trim());
-  addParam('voucherNumber', txVoucherInput?.value.trim());
-  addParam('fromDate', txFromDateInput?.value);
-  addParam('toDate', txToDateInput?.value);
-  addParam('minAmount', txMinAmountInput?.value);
-  addParam('maxAmount', txMaxAmountInput?.value);
-  addParam('voucherType', txVoucherTypeInput?.value.trim());
+  const party = txPartyInput?.value.trim();
+  const voucherNumber = txVoucherInput?.value.trim();
+  const fromDate = txFromDateInput?.value;
+  const toDate = txToDateInput?.value;
+  const minAmount = txMinAmountInput?.value;
+  const maxAmount = txMaxAmountInput?.value;
+  const voucherType = txVoucherTypeInput?.value.trim();
+
+  addParam('party', party);
+  addParam('voucherNumber', voucherNumber);
+  addParam('fromDate', fromDate);
+  addParam('toDate', toDate);
+  addParam('minAmount', minAmount);
+  addParam('maxAmount', maxAmount);
+  addParam('voucherType', voucherType);
   params.append('limit', 25);
+
+  const hasFilters = [
+    party,
+    voucherNumber,
+    fromDate,
+    toDate,
+    minAmount,
+    maxAmount,
+    voucherType
+  ].some(Boolean);
+
+  if (!hasFilters) {
+    txSearchResults.innerHTML = '<p class="no-data">Use filters above to search. Recent Transactions already shows the latest activity.</p>';
+    return;
+  }
 
   const queryString = params.toString();
   const url = queryString ? `${API_URL}/transactions/search?${queryString}` : `${API_URL}/transactions/search`;
@@ -1254,6 +1322,10 @@ async function runTransactionSearch(auto = false) {
       `;
     }).join('');
 
+    // Only render when explicit filters are applied to avoid duplicating Recent Transactions
+    // Only render when explicit filters are applied to avoid duplicating Recent Transactions
+    // Only render when explicit filters are applied to avoid duplicating Recent Transactions
+    // Only render when explicit filters are applied to avoid duplicating Recent Transactions
     txSearchResults.innerHTML = `
       <table class="analytics-table">
         <thead>

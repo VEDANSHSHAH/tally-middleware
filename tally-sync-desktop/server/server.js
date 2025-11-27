@@ -18,7 +18,7 @@ if (envResult.error) {
   console.log('✅ Environment variables loaded from:', envPath);
 }
 
-const { pool, initDB } = require('./db/postgres');
+const { pool, initDB, refreshMaterializedViews } = require('./db/postgres');
 const { getCompanyInfo, getAllCompanies } = require('./tally/companyInfo');
 const cache = require('./cache');
 const { updateProgress, getProgress, resetProgress } = require('./syncProgress');
@@ -123,9 +123,37 @@ const {
   calculateVendorScores
 } = require('./analytics/paymentCycles');
 
+// Lightweight in-memory rate limiter (fallback to avoid external dependency issues)
+const makeSimpleRateLimiter = ({ windowMs, max }) => {
+  const hits = new Map();
+  return (req, res, next) => {
+    const key = req.ip || 'global';
+    const now = Date.now();
+    const windowStart = now - windowMs;
+    const bucket = hits.get(key) || [];
+    const recent = bucket.filter(ts => ts > windowStart);
+    recent.push(now);
+    hits.set(key, recent);
+    if (recent.length > max) {
+      return res.status(429).json({
+        success: false,
+        error: 'Too many requests. Please slow down.',
+        retryAfter: Math.ceil(windowMs / 1000)
+      });
+    }
+    next();
+  };
+};
+
 const app = express();
 app.use(cors());
 app.use(express.json());
+
+// Rate limiting (protect API and AI calls) using lightweight limiter
+const aiRateLimiter = makeSimpleRateLimiter({ windowMs: 60 * 1000, max: 10 });
+const generalRateLimiter = makeSimpleRateLimiter({ windowMs: 60 * 1000, max: 100 });
+app.use('/api/ai/', aiRateLimiter);
+app.use('/api/', generalRateLimiter);
 
 // ADD THIS SECTION - Compression middleware
 app.use(compression({
@@ -182,6 +210,15 @@ const extractValue = (value) => {
   if (typeof value === 'object' && '_' in value) return value._;
   return value;
 };
+
+// Friendly root handler so hitting "/" shows a message instead of "Cannot GET /"
+app.get('/', (req, res) => {
+  res.json({
+    message: 'Tally Middleware API is running',
+    docs: 'Use /api/test or other /api/* endpoints',
+    port: PORT
+  });
+});
 
 // Format currency in Indian format (₹ with commas)
 function formatCurrency(amount) {
@@ -255,33 +292,6 @@ async function runAllMigrations() {
 }
 
 // runAllMigrations();
-
-// =====================================================
-// MATERIALIZED VIEWS REFRESH
-// =====================================================
-
-// Function to refresh all materialized views (called after syncs)
-async function refreshMaterializedViews() {
-  console.log('🔄 Refreshing materialized views...');
-  const startTime = Date.now();
-
-  try {
-    const result = await refreshAllViews();
-
-    if (result.success) {
-      const duration = result.duration || (Date.now() - startTime);
-      console.log(`✅ Materialized views refreshed in ${duration}ms`);
-      return { success: true, duration };
-    } else {
-      console.warn('⚠️ Materialized views refresh had issues:', result.error);
-      return result;
-    }
-  } catch (error) {
-    console.error('❌ Error refreshing materialized views:', error.message);
-    return { success: false, error: error.message };
-  }
-}
-
 // Helper function to query Tally with retry logic
 async function queryTally(xmlRequest, options = {}) {
   const {
@@ -3692,6 +3702,16 @@ async function autoSync() {
     const analyticsResponse = await axios.post(`http://localhost:${PORT}/api/analytics/calculate`);
     autoSyncStatus.results.analytics = { success: true };
     console.log(`✅ Analytics: ${analyticsResponse.data.message}`);
+
+    // Refresh materialized views for faster dashboards
+    autoSyncStatus.currentStep = 'refresh_views';
+    const viewRefreshResult = await refreshMaterializedViews();
+    autoSyncStatus.results.views = viewRefreshResult;
+    if (viewRefreshResult.success) {
+      console.log(`�o. Materialized views refreshed ${viewRefreshResult.fallback ? '(non-concurrent)' : ''}`);
+    } else {
+      console.warn('�s��,? Materialized view refresh failed:', viewRefreshResult.error);
+    }
 
     const totalDuration = Date.now() - syncStartTime;
     autoSyncStatus.lastDuration = totalDuration;

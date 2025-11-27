@@ -334,4 +334,35 @@ const updateSchemaConstraints = async () => {
   }
 };
 
-module.exports = { pool, initDB };
+// Refresh materialized views helper (used after sync/analytics)
+async function refreshMaterializedViews() {
+  if (!pool) {
+    return { success: false, error: 'DATABASE_URL not configured' };
+  }
+  try {
+    console.log('dY"S Refreshing materialized views...');
+    const start = Date.now();
+    await Promise.all([
+      pool.query('REFRESH MATERIALIZED VIEW CONCURRENTLY mv_vendor_aging_summary'),
+      pool.query('REFRESH MATERIALIZED VIEW CONCURRENTLY mv_customer_aging_summary'),
+      pool.query('REFRESH MATERIALIZED VIEW CONCURRENTLY mv_daily_summary')
+    ]);
+    const duration = Date.now() - start;
+    console.log(`�o. Materialized views refreshed in ${duration}ms`);
+    return { success: true, duration };
+  } catch (error) {
+    console.warn('�s��,? Concurrent refresh failed, retrying without CONCURRENTLY:', error.message);
+    try {
+      await pool.query('REFRESH MATERIALIZED VIEW mv_vendor_aging_summary');
+      await pool.query('REFRESH MATERIALIZED VIEW mv_customer_aging_summary');
+      await pool.query('REFRESH MATERIALIZED VIEW mv_daily_summary');
+      console.log('�o. Materialized views refreshed (non-concurrent)');
+      return { success: true, fallback: true };
+    } catch (retryError) {
+      console.error('�?O Materialized view refresh failed:', retryError.message);
+      return { success: false, error: retryError.message };
+    }
+  }
+}
+
+module.exports = { pool, initDB, refreshMaterializedViews };
