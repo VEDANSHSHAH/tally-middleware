@@ -291,7 +291,10 @@ async function runAllMigrations() {
   await installMaterializedViews();
 }
 
-// runAllMigrations();
+// Auto-run migrations (safe to rerun; uses IF NOT EXISTS/ON CONFLICT guards)
+runAllMigrations().catch(err => {
+  console.error('⚠️ Startup migrations failed (continuing):', err.message);
+});
 // Helper function to query Tally with retry logic
 async function queryTally(xmlRequest, options = {}) {
   const {
@@ -2386,23 +2389,37 @@ app.post('/api/sync/transactions', async (req, res) => {
     // Reset progress
     resetProgress('transaction');
 
-    res.json({
-      success: true,
-      message: `Successfully synced ${syncedCount} transactions from Tally (${syncMode} sync)`,
-      count: syncedCount,
-      total: totalTransactions,
-      period: { from: fromDate, to: toDate },
-      syncMode: syncMode,
-      syncReason: syncReason,
-      duration: `${Math.round(syncDuration / 1000)}s`,
-      errors: errors.length > 0 ? errors.slice(0, 10) : undefined,
-      errorCount: errors.length
-    });
+      res.json({
+        success: true,
+        message: `Successfully synced ${syncedCount} transactions from Tally (${syncMode} sync)`,
+        count: syncedCount,
+        total: totalTransactions,
+        period: { from: fromDate, to: toDate },
+        syncMode: syncMode,
+        syncReason: syncReason,
+        duration: `${Math.round(syncDuration / 1000)}s`,
+        errors: errors.length > 0 ? errors.slice(0, 10) : undefined,
+        errorCount: errors.length
+      });
 
-    // Invalidate cache after successful sync
-    if (companyGuid) {
-      cache.deletePattern(`stats:${companyGuid}*`);
-      cache.deletePattern(`aging:${companyGuid}*`);
+      // Auto-run analytics right after a transaction sync so dashboards stay fresh
+      try {
+        console.log('dY"S Auto-calculating analytics after transaction sync...');
+        await calculateVendorSettlementCycles(companyGuid);
+        await calculateOutstandingAging(companyGuid);
+        await calculateVendorScores(companyGuid);
+        await refreshMaterializedViews();
+        cache.deletePattern(`stats:${companyGuid}*`);
+        cache.deletePattern(`aging:${companyGuid}*`);
+        console.log('�o. Analytics refreshed post-sync');
+      } catch (analyticsError) {
+        console.warn('�s��,? Analytics refresh after sync failed:', analyticsError.message);
+      }
+
+      // Invalidate cache after successful sync
+      if (companyGuid) {
+        cache.deletePattern(`stats:${companyGuid}*`);
+        cache.deletePattern(`aging:${companyGuid}*`);
       cache.deletePattern(`customers:${companyGuid}*`);
       cache.deletePattern(`transactions:${companyGuid}*`);
       console.log(`🗑️  Cache invalidated for company: ${companyGuid}`);
@@ -3419,47 +3436,56 @@ app.get('/api/analytics/overdue-analysis', async (req, res) => {
       return res.json({ success: false, error: 'Company not configured. Please run setup first.' });
     }
 
-    const analysis = await pool.query(`
-      WITH overdue_summary AS (
+      // Join to customers/vendors to derive display name instead of relying on entity_name column
+      const analysis = await pool.query(`
+        WITH base AS (
+          SELECT 
+            oa.*,
+            COALESCE(c.name, v.name, 'Unknown') AS entity_name
+          FROM outstanding_aging oa
+          LEFT JOIN customers c ON oa.customer_id = c.id AND oa.company_guid = c.company_guid
+          LEFT JOIN vendors v ON oa.vendor_id = v.id AND oa.company_guid = v.company_guid
+          WHERE oa.company_guid = $1
+            AND oa.entity_type = 'customer'
+            AND (oa.current_31_60_days + oa.current_61_90_days + oa.current_over_90_days) > 0
+        ),
+        overdue_summary AS (
+          SELECT 
+            SUM(current_31_60_days + current_61_90_days + current_over_90_days) AS total_overdue,
+            SUM(current_31_60_days) AS overdue_30_60,
+            SUM(current_61_90_days) AS overdue_60_90,
+            SUM(current_over_90_days) AS overdue_90_plus,
+            COUNT(DISTINCT entity_name) AS overdue_customers
+          FROM base
+        ),
+        top_overdue AS (
+          SELECT 
+            entity_name,
+            (current_31_60_days + current_61_90_days + current_over_90_days) AS overdue_amount,
+            current_over_90_days,
+            current_61_90_days,
+            current_31_60_days
+          FROM base
+          ORDER BY overdue_amount DESC
+          LIMIT 10
+        )
         SELECT 
-          SUM(current_31_60_days + current_61_90_days + current_over_90_days) as total_overdue,
-          SUM(current_31_60_days) as overdue_30_60,
-          SUM(current_61_90_days) as overdue_60_90,
-          SUM(current_over_90_days) as overdue_90_plus,
-          COUNT(DISTINCT entity_name) as overdue_customers
-        FROM outstanding_aging
-        WHERE company_guid = $1
-        AND entity_type = 'customer'
-        AND (current_31_60_days + current_61_90_days + current_over_90_days) > 0
-      ),
-      top_overdue AS (
-        SELECT 
-          entity_name,
-          (current_31_60_days + current_61_90_days + current_over_90_days) as overdue_amount,
-          current_over_90_days,
-          current_61_90_days,
-          current_31_60_days
-        FROM outstanding_aging
-        WHERE company_guid = $1
-        AND entity_type = 'customer'
-        AND (current_31_60_days + current_61_90_days + current_over_90_days) > 0
-        ORDER BY overdue_amount DESC
-        LIMIT 10
-      )
-      SELECT 
-        json_build_object(
-          'total_overdue', os.total_overdue,
-          'overdue_30_60', os.overdue_30_60,
-          'overdue_60_90', os.overdue_60_90,
-          'overdue_90_plus', os.overdue_90_plus,
-          'overdue_customers', os.overdue_customers
-        ) as summary,
-        json_agg(to_overdue.*) as top_overdue
-      FROM overdue_summary os
-      CROSS JOIN top_overdue to_overdue
-      GROUP BY os.total_overdue, os.overdue_30_60, os.overdue_60_90, 
-               os.overdue_90_plus, os.overdue_customers
-    `, [companyGuid]);
+          json_build_object(
+            'total_overdue', os.total_overdue,
+            'overdue_30_60', os.overdue_30_60,
+            'overdue_60_90', os.overdue_60_90,
+            'overdue_90_plus', os.overdue_90_plus,
+            'overdue_customers', os.overdue_customers
+          ) AS summary,
+          COALESCE(
+            json_agg(to_overdue.*) FILTER (WHERE to_overdue.entity_name IS NOT NULL),
+            '[]'::json
+          ) AS top_overdue
+        FROM overdue_summary os
+        LEFT JOIN top_overdue to_overdue ON true
+        GROUP BY os.total_overdue, os.overdue_30_60, os.overdue_60_90, 
+                 os.overdue_90_plus, os.overdue_customers
+      `, [companyGuid]);
 
     res.json({
       success: true,
@@ -3570,7 +3596,7 @@ app.post('/api/analytics/calculate', async (req, res) => {
 
 // ==================== AUTO-SYNC SCHEDULER ====================
 
-const SYNC_INTERVAL = 5 * 60 * 1000; // 5 minutes in milliseconds
+const SYNC_INTERVAL = 15 * 60 * 1000; // 15 minutes in milliseconds
 const MIN_SYNC_GAP = 2 * 60 * 1000; // Minimum 2 minutes between any syncs
 
 // Auto-sync status tracking (for UI feedback)
@@ -3619,7 +3645,7 @@ app.post('/api/sync/manual-start', (req, res) => {
 app.post('/api/sync/manual-complete', (req, res) => {
   autoSyncStatus.manualSyncInProgress = false;
   autoSyncStatus.lastManualSyncCompleted = new Date().toISOString();
-  console.log('📝 Manual sync completed - next auto-sync delayed by 5 minutes');
+  console.log(`dY"? Manual sync completed - next auto-sync delayed by ${Math.round(SYNC_INTERVAL / 60000)} minutes`);
   res.json({ success: true, message: 'Manual sync completion registered' });
 });
 
@@ -3770,15 +3796,14 @@ const server = app.listen(PORT, () => {
   console.log(`   GET  /api/analytics/payment-cycles ⭐`);
   console.log(`   POST /api/analytics/calculate ⭐ Refreshes materialized views`);
   console.log(`   GET  /api/test/materialized-views ⭐ Test MV performance`);
-  console.log(`\n⏰ Auto-sync: Every 5 minutes`);
+  console.log(`\n⏰ Auto-sync: Every ${Math.round(SYNC_INTERVAL / 60000)} minutes`);
   console.log(`🔄 First sync in 10 seconds...\n`);
 
-  // Run first sync after 10 seconds
-  // setTimeout(() => {
-  //   autoSync();
-  //   // Then run every 5 minutes
-  //   syncInterval = setInterval(autoSync, SYNC_INTERVAL);
-  // }, 10000);
+  // Run first sync after 10 seconds, then on the configured interval
+  setTimeout(() => {
+    autoSync();
+    syncInterval = setInterval(autoSync, SYNC_INTERVAL);
+  }, 10000);
 }).on('error', (err) => {
   if (err.code === 'EADDRINUSE') {
     console.error(`\n❌ ERROR: Port ${PORT} is already in use!`);
@@ -3814,3 +3839,6 @@ process.on('SIGINT', () => {
     });
   });
 });
+
+
+
