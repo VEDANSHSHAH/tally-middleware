@@ -16,7 +16,7 @@ CREATE INDEX IF NOT EXISTS idx_transactions_company_date
 
 -- Partial index for payment/receipt queries (more efficient)
 CREATE INDEX IF NOT EXISTS idx_transactions_voucher_type 
-  ON transactions(company_guid, voucher_type) 
+  ON transactions(company_guid, voucher_type)
   WHERE voucher_type LIKE '%Payment%' OR voucher_type LIKE '%Receipt%';
 
 -- Aging API Optimization Indexes

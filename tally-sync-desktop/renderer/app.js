@@ -1,5 +1,5 @@
 // Get API URL from electronAPI if available, otherwise use default
-let API_URL = 'http://localhost:3000/api';
+let API_URL = 'http://localhost:3001/api';
 const AI_API_URL = 'https://tally-middleware-production-7856.up.railway.app';
 
 // Initialize API URL on page load (wait for it to complete)
@@ -2045,8 +2045,7 @@ function stopAutoSyncPolling() {
   }
 }
 
-// Start auto-sync polling when app loads
-startAutoSyncPolling();
+// Start auto-sync polling will be called from init() after API URL is initialized
 
 // Settings button - reset setup and show setup wizard
 document.getElementById('settings-btn')?.addEventListener('click', () => {
@@ -2117,6 +2116,9 @@ async function init() {
   
   console.log(`🔗 Final API_URL: ${API_URL}`);
   
+  // Start auto-sync polling now that API URL is initialized
+  startAutoSyncPolling();
+  
   // Test connection with retries (5 attempts, 1 second apart)
   console.log('🔍 Starting connection test...');
   const connected = await testConnection(5, 1000);
@@ -2155,7 +2157,7 @@ async function init() {
           });
           setInterval(loadDashboardData, 30000);
         } else {
-          addLog('❌ Still unable to connect. Check if server is running on port 3000.');
+          addLog('❌ Still unable to connect. Check if server is running on the correct port.');
         }
       });
     }, 5000);

@@ -173,7 +173,7 @@ app.use(compression({
 }));
 
 const TALLY_URL = process.env.TALLY_URL || 'http://localhost:9000';
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 3001;
 const DEFAULT_BUSINESS_ID = process.env.BUSINESS_ID || 'default-business';
 const DEFAULT_BUSINESS_NAME = process.env.BUSINESS_NAME || 'Primary Business';
 const BUSINESS_CACHE_MS = 5 * 60 * 1000;
@@ -247,17 +247,77 @@ async function runCompanyMigration() {
   }
 }
 
+// Helper function to split SQL statements while respecting dollar-quoted strings
+function splitSQLStatements(sql) {
+  const statements = [];
+  let currentStatement = '';
+  let inDollarQuote = false;
+  let dollarTag = '';
+  
+  const lines = sql.split('\n');
+  
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    let remainingLine = line;
+    
+    // Check for dollar-quoted strings ($$ or $tag$)
+    while (remainingLine.length > 0) {
+      if (!inDollarQuote) {
+        // Look for start of dollar quote: $ followed by optional tag, followed by $
+        const dollarMatch = remainingLine.match(/\$[a-zA-Z_]*\$/);
+        if (dollarMatch) {
+          dollarTag = dollarMatch[0];
+          inDollarQuote = true;
+          const beforeQuote = remainingLine.substring(0, dollarMatch.index);
+          currentStatement += beforeQuote + dollarTag;
+          remainingLine = remainingLine.substring(dollarMatch.index + dollarTag.length);
+        } else {
+          currentStatement += remainingLine;
+          remainingLine = '';
+        }
+      } else {
+        // Look for end of dollar quote (must match the opening tag)
+        const endIndex = remainingLine.indexOf(dollarTag);
+        if (endIndex !== -1) {
+          currentStatement += remainingLine.substring(0, endIndex + dollarTag.length);
+          remainingLine = remainingLine.substring(endIndex + dollarTag.length);
+          inDollarQuote = false;
+          dollarTag = '';
+        } else {
+          currentStatement += remainingLine;
+          remainingLine = '';
+        }
+      }
+    }
+    
+    currentStatement += '\n';
+    
+    // Only split on semicolon if we're NOT inside a dollar-quoted string
+    if (!inDollarQuote && line.trim().endsWith(';')) {
+      const trimmed = currentStatement.trim();
+      if (trimmed && !trimmed.startsWith('--')) {
+        statements.push(trimmed);
+      }
+      currentStatement = '';
+    }
+  }
+  
+  // Add any remaining statement
+  if (currentStatement.trim()) {
+    statements.push(currentStatement.trim());
+  }
+  
+  return statements;
+}
+
 // Run incremental sync migration on startup (auto-runs, no manual step needed!)
 async function runIncrementalSyncMigration() {
   try {
     const migrationPath = path.join(__dirname, 'db', 'incremental_sync_migration.sql');
     if (fs.existsSync(migrationPath)) {
       const migrationSQL = fs.readFileSync(migrationPath, 'utf8');
-      // Split and run each statement
-      const statements = migrationSQL
-        .split(';')
-        .map(s => s.trim())
-        .filter(s => s.length > 0 && !s.startsWith('--'));
+      // Split and run each statement using smart splitting
+      const statements = splitSQLStatements(migrationSQL);
 
       for (const statement of statements) {
         try {
@@ -2618,6 +2678,14 @@ app.post('/api/sync/reset', async (req, res) => {
 // Database stats endpoint with caching
 app.get('/api/stats', async (req, res) => {
   try {
+    // Check database connection first
+    if (!pool) {
+      return res.status(503).json({
+        success: false,
+        error: 'Database not configured. Please check DATABASE_URL in .env file.'
+      });
+    }
+
     // Load selected company from config
     const config = loadConfig();
 
@@ -2648,30 +2716,47 @@ app.get('/api/stats', async (req, res) => {
     const whereClause = 'WHERE company_guid = $1';
     const params = [companyGuid];
 
-    // Execute queries in parallel for better performance
+    // Execute queries in parallel for better performance with timeout handling
+    const queryTimeout = 25000; // 25 seconds timeout per query
+    
+    const queryWithTimeout = (queryText, queryParams) => {
+      return Promise.race([
+        pool.query(queryText, queryParams),
+        new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('Query timeout exceeded')), queryTimeout)
+        )
+      ]);
+    };
+
     const [vendorStats, customerStats, transactionStats, lastSyncResult] = await Promise.all([
       // Vendors stats - FILTERED
-      pool.query(`
+      queryWithTimeout(`
         SELECT 
           COUNT(*) as total_vendors,
           COALESCE(SUM(current_balance), 0) as total_payables,
           MAX(synced_at) as last_vendor_sync
         FROM vendors 
         ${whereClause}
-      `, params),
+      `, params).catch(err => {
+        console.error('⚠️ Vendor stats query failed:', err.message);
+        return { rows: [{ total_vendors: 0, total_payables: 0, last_vendor_sync: null }] };
+      }),
 
       // Customers stats - FILTERED
-      pool.query(`
+      queryWithTimeout(`
         SELECT 
           COUNT(*) as total_customers,
           COALESCE(SUM(current_balance), 0) as total_receivables,
           MAX(synced_at) as last_customer_sync
         FROM customers 
         ${whereClause}
-      `, params),
+      `, params).catch(err => {
+        console.error('⚠️ Customer stats query failed:', err.message);
+        return { rows: [{ total_customers: 0, total_receivables: 0, last_customer_sync: null }] };
+      }),
 
       // Transactions stats - FILTERED
-      pool.query(`
+      queryWithTimeout(`
         SELECT 
           COUNT(*) as total_transactions,
           COALESCE(SUM(CASE WHEN voucher_type LIKE '%Payment%' THEN amount ELSE 0 END), 0) as total_payments,
@@ -2679,14 +2764,20 @@ app.get('/api/stats', async (req, res) => {
           MAX(synced_at) as last_transaction_sync
         FROM transactions 
         ${whereClause}
-      `, params),
+      `, params).catch(err => {
+        console.error('⚠️ Transaction stats query failed:', err.message);
+        return { rows: [{ total_transactions: 0, total_payments: 0, total_receipts: 0, last_transaction_sync: null }] };
+      }),
 
       // Last sync from companies table
-      pool.query(`
+      queryWithTimeout(`
         SELECT last_sync 
         FROM companies 
         WHERE company_guid = $1
-      `, [companyGuid])
+      `, [companyGuid]).catch(err => {
+        console.error('⚠️ Last sync query failed:', err.message);
+        return { rows: [{ last_sync: null }] };
+      })
     ]);
 
     const timestamps = [
@@ -2755,7 +2846,22 @@ app.get('/api/stats', async (req, res) => {
 
     res.json(response);
   } catch (error) {
-    res.status(500).json({ success: false, error: error.message });
+    console.error('❌ Stats endpoint error:', error.message);
+    console.error('   Stack:', error.stack);
+    
+    // Provide more helpful error messages
+    let errorMessage = error.message;
+    if (error.message.includes('timeout') || error.message.includes('Connection terminated')) {
+      errorMessage = 'Database connection timeout. The database may be slow or unreachable.';
+    } else if (error.message.includes('ECONNREFUSED')) {
+      errorMessage = 'Cannot connect to database. Please check DATABASE_URL and ensure the database is running.';
+    }
+    
+    res.status(500).json({ 
+      success: false, 
+      error: errorMessage,
+      details: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
   }
 });
 
