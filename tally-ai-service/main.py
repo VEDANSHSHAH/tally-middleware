@@ -21,6 +21,8 @@ from services.openai_service import (
     generate_cashflow_insight,
     answer_question
 )
+from routes import dashboard
+from jobs.refresh_scheduler import start_scheduler, stop_scheduler
 
 load_dotenv()
 
@@ -38,6 +40,19 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+app.include_router(dashboard.router)
+
+@app.on_event("startup")
+async def startup_event():
+    start_scheduler()
+    print("✅ Background scheduler started")
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    stop_scheduler()
+    print("Scheduler stopped")
 
 @app.get("/")
 async def root():

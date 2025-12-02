@@ -404,6 +404,134 @@ async function queryTally(xmlRequest, options = {}) {
   throw lastError;
 }
 
+// Load group hierarchy either from database or directly from Tally (used for nested vendor/customer groups)
+async function loadGroupHierarchy(companyGuid) {
+  const groupMap = new Map();
+  if (!companyGuid) return groupMap;
+
+  // Helper to add a group and track whether Sundry groups are present
+  let hasSundryGroups = false;
+  const addGroup = (name, parent, primaryGroup) => {
+    const trimmedName = (name || '').trim();
+    if (!trimmedName) return;
+
+    const parentVal = (parent || '').trim();
+    const primaryVal = (primaryGroup || '').trim();
+
+    const key = trimmedName.toLowerCase();
+    groupMap.set(key, {
+      parent: parentVal.toLowerCase(),
+      primaryGroup: primaryVal.toLowerCase()
+    });
+
+    if (
+      key === 'sundry creditors' ||
+      key === 'sundry debtors' ||
+      primaryVal.toLowerCase() === 'sundry creditors' ||
+      primaryVal.toLowerCase() === 'sundry debtors'
+    ) {
+      hasSundryGroups = true;
+    }
+  };
+
+  // Try database first so we do not hit Tally on every sync.
+  try {
+    if (pool) {
+      const dbGroups = await pool.query(
+        'SELECT name, parent, primary_group FROM groups WHERE company_guid = $1',
+        [companyGuid]
+      );
+      dbGroups.rows.forEach(row => addGroup(row.name, row.parent, row.primary_group));
+    }
+  } catch (error) {
+    console.warn('Could not load groups from database for filtering:', error.message);
+  }
+
+  // If DB data is missing/partial (no Sundry groups detected), enrich from Tally.
+  if (groupMap.size === 0 || !hasSundryGroups) {
+    try {
+      const groupRequest = `
+        <ENVELOPE>
+          <HEADER>
+            <VERSION>1</VERSION>
+            <TALLYREQUEST>Export</TALLYREQUEST>
+            <TYPE>Collection</TYPE>
+            <ID>Group Collection</ID>
+          </HEADER>
+          <BODY>
+            <DESC>
+              <STATICVARIABLES>
+                <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+              </STATICVARIABLES>
+              <TDL>
+                <TDLMESSAGE>
+                  <COLLECTION NAME="Group Collection">
+                    <TYPE>Group</TYPE>
+                    <FETCH>GUID, Name, Parent, PrimaryGroup</FETCH>
+                  </COLLECTION>
+                </TDLMESSAGE>
+              </TDL>
+            </DESC>
+          </BODY>
+        </ENVELOPE>
+      `;
+
+      const result = await queryTally(groupRequest, { timeout: 40000, retries: 1, queryType: 'group_lookup' });
+      const groups = result?.ENVELOPE?.BODY?.DATA?.COLLECTION?.GROUP;
+      const groupArray = Array.isArray(groups) ? groups : (groups ? [groups] : []);
+
+      groupArray.forEach(group => {
+        const name = extractValue(group?.NAME);
+        const parent = extractValue(group?.PARENT);
+        const primaryGroup = extractValue(group?.PRIMARYGROUP);
+        addGroup(name, parent, primaryGroup);
+      });
+
+      if (groupMap.size > 0) {
+        console.log(`Loaded ${groupMap.size} groups from Tally for group filtering${hasSundryGroups ? '' : ' (no Sundry groups seen in DB, using Tally data)'}`);
+      }
+    } catch (error) {
+      console.warn('Could not load groups from Tally for filtering:', error.message);
+    }
+  }
+
+  return groupMap;
+}
+
+// Check if a ledger's parent group ultimately belongs to a target primary group (e.g., Sundry Creditors).
+function isUnderPrimaryGroup(groupName, targetPrimaryGroup, groupsMap) {
+  if (!groupName || !targetPrimaryGroup) return false;
+
+  const target = targetPrimaryGroup.trim().toLowerCase();
+  let current = groupName.trim().toLowerCase();
+
+  if (current === target) {
+    return true;
+  }
+
+  if (!groupsMap || groupsMap.size === 0) {
+    // No hierarchy info available; only match direct parent.
+    return current === target;
+  }
+
+  const visited = new Set();
+
+  while (current && !visited.has(current)) {
+    visited.add(current);
+    const group = groupsMap.get(current);
+
+    if (!group) break;
+
+    if (group.primaryGroup === target || group.parent === target) {
+      return true;
+    }
+
+    current = group.parent;
+  }
+
+  return false;
+}
+
 async function getBusinessMetadata(forceRefresh = false) {
   const now = Date.now();
   if (!forceRefresh && cachedBusinessMeta && cachedBusinessExpiry > now) {
@@ -857,6 +985,7 @@ app.get('/api/vendors/:id', async (req, res) => {
 
 // Sync vendors from Tally to PostgreSQL
 app.post('/api/sync/vendors', async (req, res) => {
+  const syncStartTime = Date.now();
   try {
     console.log('🔄 Starting vendor sync from Tally...');
 
@@ -894,7 +1023,33 @@ app.post('/api/sync/vendors', async (req, res) => {
 
     console.log(`✅ Verified: Tally company "${tallyCompanyInfo.name}" matches selected company "${config.company.name}"`);
 
-    const xmlRequest = `
+    // Determine whether to run full or incremental sync
+    const { forceFullSync } = req.body || {};
+    const syncDecision = await shouldRunFullSync(companyGuid, 'vendors');
+    let syncMode = 'full';
+    let syncReason = 'full';
+    let alteredAfter = null;
+    let fromDate = null;
+    const toDate = new Date().toISOString().split('T')[0];
+
+    if (forceFullSync) {
+      syncReason = 'user_requested';
+      console.log('Force full vendor sync requested');
+    } else if (syncDecision.isFullSync) {
+      syncReason = syncDecision.reason;
+      console.log(`📦 Running FULL vendor sync (${syncReason})`);
+    } else {
+      syncMode = 'incremental';
+      syncReason = 'incremental';
+      const lastSyncDate = new Date(syncDecision.lastSyncTime);
+      // Look back 1 day to avoid missing late edits
+      lastSyncDate.setDate(lastSyncDate.getDate() - 1);
+      fromDate = lastSyncDate.toISOString().split('T')[0];
+      alteredAfter = formatTallyDate(lastSyncDate); // Tally expects YYYYMMDD
+      console.log(`⚡ Running INCREMENTAL vendor sync since ${fromDate} (Tally date ${alteredAfter})`);
+    }
+
+    const buildVendorRequest = (alterDate) => `
       <ENVELOPE>
         <HEADER>
           <VERSION>1</VERSION>
@@ -911,8 +1066,15 @@ app.post('/api/sync/vendors', async (req, res) => {
               <TDLMESSAGE>
                 <COLLECTION NAME="Ledger Collection">
                   <TYPE>Ledger</TYPE>
-                  <FETCH>GUID, Name, OpeningBalance, ClosingBalance, Parent</FETCH>
+                  <FETCH>GUID, Name, OpeningBalance, ClosingBalance, Parent, AlteredOn, AlterId</FETCH>
+                  ${alterDate ? '<FILTER>ModifiedSince</FILTER>' : ''}
                 </COLLECTION>
+                ${alterDate ? `
+                <SYSTEM TYPE="Formulae" NAME="ModifiedSince">
+                  $AlteredOn >= $$Date:##SVAlteredAfter
+                </SYSTEM>
+                <VARIABLE NAME="SVAlteredAfter" TYPE="Date">${alterDate}</VARIABLE>
+                ` : ''}
               </TDLMESSAGE>
             </TDL>
           </DESC>
@@ -920,32 +1082,95 @@ app.post('/api/sync/vendors', async (req, res) => {
       </ENVELOPE>
     `;
 
-    const result = await queryTally(xmlRequest, { queryType: 'vendor_sync' });
+    let result;
+
+    try {
+      result = await queryTally(buildVendorRequest(alteredAfter), { queryType: 'vendor_sync' });
+    } catch (err) {
+      if (alteredAfter) {
+        console.warn(`⚠️ Incremental vendor fetch failed (${err.message}), falling back to full sync...`);
+        syncMode = 'full_fallback';
+        syncReason = 'incremental_fallback';
+        alteredAfter = null;
+        fromDate = null;
+        result = await queryTally(buildVendorRequest(null), { queryType: 'vendor_sync_full_fallback' });
+      } else {
+        throw err;
+      }
+    }
 
     if (!result?.ENVELOPE?.BODY?.DATA?.COLLECTION?.LEDGER) {
+      const syncDuration = Date.now() - syncStartTime;
+      await updateSyncHistory(companyGuid, 'vendors', 0, syncDuration, syncMode, fromDate, toDate, null);
+      await logSyncToHistory(companyGuid, 'vendors', new Date(syncStartTime), 0, syncDuration, syncMode, fromDate, toDate, null);
       return res.json({
         success: true,
         message: 'No vendors found in Tally',
-        count: 0
+        count: 0,
+        syncMode,
+        syncReason,
+        duration: `${Math.round(syncDuration / 1000)}s`
       });
     }
 
-    const ledgers = result.ENVELOPE.BODY.DATA.COLLECTION.LEDGER;
-    const ledgerArray = Array.isArray(ledgers) ? ledgers : [ledgers];
+    let ledgers = result.ENVELOPE.BODY.DATA.COLLECTION.LEDGER;
+    let ledgerArray = Array.isArray(ledgers) ? ledgers : [ledgers];
 
-    // Filter to only get Sundry Creditors (vendors)
+    // Incremental sometimes returns nothing if AlteredOn is blank in Tally; retry with full fetch.
+    if (ledgerArray.length === 0 && alteredAfter) {
+      console.warn('Incremental vendor sync returned 0 ledgers, retrying with full fetch...');
+      syncMode = 'full_fallback';
+      syncReason = 'incremental_empty';
+      alteredAfter = null;
+      fromDate = null;
+      result = await queryTally(buildVendorRequest(null), { queryType: 'vendor_sync_full_on_empty' });
+      ledgers = result.ENVELOPE.BODY.DATA.COLLECTION.LEDGER;
+      ledgerArray = Array.isArray(ledgers) ? ledgers : (ledgers ? [ledgers] : []);
+    }
+
+    const groupHierarchy = await loadGroupHierarchy(companyGuid);
+
+    // Filter to only get ledgers under Sundry Creditors (including nested groups)
     const vendors = ledgerArray.filter(ledger => {
-      const parent = ledger.PARENT?._ || ledger.PARENT;
-      return parent === 'Sundry Creditors';
+      const parent = extractValue(ledger.PARENT) || ledger.PARENT;
+      const parentName = typeof parent === 'string' ? parent.trim() : parent;
+      return isUnderPrimaryGroup(parentName || '', 'Sundry Creditors', groupHierarchy);
     });
 
     console.log(`Found ${vendors.length} vendors in Sundry Creditors group`);
 
     if (vendors.length === 0) {
+      const syncDuration = Date.now() - syncStartTime;
+      await updateSyncHistory(
+        companyGuid,
+        'vendors',
+        0,
+        syncDuration,
+        syncMode,
+        fromDate,
+        toDate,
+        null
+      );
+      await logSyncToHistory(
+        companyGuid,
+        'vendors',
+        new Date(syncStartTime),
+        0,
+        syncDuration,
+        syncMode,
+        fromDate,
+        toDate,
+        null
+      );
       return res.json({
         success: true,
         message: 'No vendors found in Sundry Creditors group',
-        count: 0
+        count: 0,
+        syncMode,
+        syncReason,
+        fromDate,
+        toDate,
+        duration: `${Math.round(syncDuration / 1000)}s`
       });
     }
 
@@ -997,11 +1222,41 @@ app.post('/api/sync/vendors', async (req, res) => {
 
     console.log(`✅ Synced ${syncedCount} vendors`);
 
+    const syncDuration = Date.now() - syncStartTime;
+
+    await updateSyncHistory(
+      companyGuid,
+      'vendors',
+      syncedCount,
+      syncDuration,
+      syncMode,
+      fromDate,
+      toDate,
+      errors.length > 0 ? `${errors.length} errors during sync` : null
+    );
+
+    await logSyncToHistory(
+      companyGuid,
+      'vendors',
+      new Date(syncStartTime),
+      syncedCount,
+      syncDuration,
+      syncMode,
+      fromDate,
+      toDate,
+      errors.length > 0 ? `${errors.length} errors` : null
+    );
+
     res.json({
       success: true,
       message: `Successfully synced ${syncedCount} vendors from Tally`,
       count: syncedCount,
-      errors: errors.length > 0 ? errors : undefined
+      errors: errors.length > 0 ? errors : undefined,
+      syncMode,
+      syncReason,
+      fromDate,
+      toDate,
+      duration: `${Math.round(syncDuration / 1000)}s`
     });
 
     // Invalidate cache after successful sync
@@ -1014,6 +1269,21 @@ app.post('/api/sync/vendors', async (req, res) => {
     }
   } catch (error) {
     console.error('Sync error:', error);
+    const syncDuration = Date.now() - syncStartTime;
+    const config = loadConfig();
+    if (config?.company?.guid) {
+      await logSyncToHistory(
+        config.company.guid,
+        'vendors',
+        new Date(syncStartTime),
+        0,
+        syncDuration,
+        'failed',
+        null,
+        null,
+        error.message
+      );
+    }
     res.status(500).json({
       success: false,
       error: error.message,
@@ -1113,6 +1383,7 @@ app.get('/api/customers/:id', async (req, res) => {
 
 // Sync customers from Tally to PostgreSQL
 app.post('/api/sync/customers', async (req, res) => {
+  const syncStartTime = Date.now();
   try {
     console.log('🔄 Starting customer sync from Tally...');
 
@@ -1150,7 +1421,33 @@ app.post('/api/sync/customers', async (req, res) => {
 
     console.log(`✅ Verified: Tally company "${tallyCompanyInfo.name}" matches selected company "${config.company.name}"`);
 
-    const xmlRequest = `
+    // Determine whether to run full or incremental sync
+    const { forceFullSync } = req.body || {};
+    const syncDecision = await shouldRunFullSync(companyGuid, 'customers');
+    let syncMode = 'full';
+    let syncReason = 'full';
+    let alteredAfter = null;
+    let fromDate = null;
+    const toDate = new Date().toISOString().split('T')[0];
+
+    if (forceFullSync) {
+      syncReason = 'user_requested';
+      console.log('Force full customer sync requested');
+    } else if (syncDecision.isFullSync) {
+      syncReason = syncDecision.reason;
+      console.log(`📦 Running FULL customer sync (${syncReason})`);
+    } else {
+      syncMode = 'incremental';
+      syncReason = 'incremental';
+      const lastSyncDate = new Date(syncDecision.lastSyncTime);
+      // Look back 1 day to avoid missing late edits
+      lastSyncDate.setDate(lastSyncDate.getDate() - 1);
+      fromDate = lastSyncDate.toISOString().split('T')[0];
+      alteredAfter = formatTallyDate(lastSyncDate); // Tally expects YYYYMMDD
+      console.log(`⚡ Running INCREMENTAL customer sync since ${fromDate} (Tally date ${alteredAfter})`);
+    }
+
+    const buildCustomerRequest = (alterDate) => `
       <ENVELOPE>
         <HEADER>
           <VERSION>1</VERSION>
@@ -1167,8 +1464,15 @@ app.post('/api/sync/customers', async (req, res) => {
               <TDLMESSAGE>
                 <COLLECTION NAME="Ledger Collection">
                   <TYPE>Ledger</TYPE>
-                  <FETCH>GUID, Name, OpeningBalance, ClosingBalance, Parent</FETCH>
+                  <FETCH>GUID, Name, OpeningBalance, ClosingBalance, Parent, AlteredOn, AlterId</FETCH>
+                  ${alterDate ? '<FILTER>ModifiedSince</FILTER>' : ''}
                 </COLLECTION>
+                ${alterDate ? `
+                <SYSTEM TYPE="Formulae" NAME="ModifiedSince">
+                  $AlteredOn >= $$Date:##SVAlteredAfter
+                </SYSTEM>
+                <VARIABLE NAME="SVAlteredAfter" TYPE="Date">${alterDate}</VARIABLE>
+                ` : ''}
               </TDLMESSAGE>
             </TDL>
           </DESC>
@@ -1176,32 +1480,95 @@ app.post('/api/sync/customers', async (req, res) => {
       </ENVELOPE>
     `;
 
-    const result = await queryTally(xmlRequest, { queryType: 'customer_sync' });
+    let result;
+
+    try {
+      result = await queryTally(buildCustomerRequest(alteredAfter), { queryType: 'customer_sync' });
+    } catch (err) {
+      if (alteredAfter) {
+        console.warn(`⚠️ Incremental customer fetch failed (${err.message}), falling back to full sync...`);
+        syncMode = 'full_fallback';
+        syncReason = 'incremental_fallback';
+        alteredAfter = null;
+        fromDate = null;
+        result = await queryTally(buildCustomerRequest(null), { queryType: 'customer_sync_full_fallback' });
+      } else {
+        throw err;
+      }
+    }
 
     if (!result?.ENVELOPE?.BODY?.DATA?.COLLECTION?.LEDGER) {
+      const syncDuration = Date.now() - syncStartTime;
+      await updateSyncHistory(companyGuid, 'customers', 0, syncDuration, syncMode, fromDate, toDate, null);
+      await logSyncToHistory(companyGuid, 'customers', new Date(syncStartTime), 0, syncDuration, syncMode, fromDate, toDate, null);
       return res.json({
         success: true,
         message: 'No customers found in Tally',
-        count: 0
+        count: 0,
+        syncMode,
+        syncReason,
+        duration: `${Math.round(syncDuration / 1000)}s`
       });
     }
 
-    const ledgers = result.ENVELOPE.BODY.DATA.COLLECTION.LEDGER;
-    const ledgerArray = Array.isArray(ledgers) ? ledgers : [ledgers];
+    let ledgers = result.ENVELOPE.BODY.DATA.COLLECTION.LEDGER;
+    let ledgerArray = Array.isArray(ledgers) ? ledgers : [ledgers];
 
-    // Filter to only get Sundry Debtors (customers)
+    // Incremental sometimes returns nothing if AlteredOn is blank in Tally; retry with full fetch.
+    if (ledgerArray.length === 0 && alteredAfter) {
+      console.warn('Incremental customer sync returned 0 ledgers, retrying with full fetch...');
+      syncMode = 'full_fallback';
+      syncReason = 'incremental_empty';
+      alteredAfter = null;
+      fromDate = null;
+      result = await queryTally(buildCustomerRequest(null), { queryType: 'customer_sync_full_on_empty' });
+      ledgers = result.ENVELOPE.BODY.DATA.COLLECTION.LEDGER;
+      ledgerArray = Array.isArray(ledgers) ? ledgers : (ledgers ? [ledgers] : []);
+    }
+
+    const groupHierarchy = await loadGroupHierarchy(companyGuid);
+
+    // Filter to only get ledgers under Sundry Debtors (including nested groups)
     const customers = ledgerArray.filter(ledger => {
-      const parent = ledger.PARENT?._ || ledger.PARENT;
-      return parent === 'Sundry Debtors';
+      const parent = extractValue(ledger.PARENT) || ledger.PARENT;
+      const parentName = typeof parent === 'string' ? parent.trim() : parent;
+      return isUnderPrimaryGroup(parentName || '', 'Sundry Debtors', groupHierarchy);
     });
 
     console.log(`Found ${customers.length} customers in Sundry Debtors group`);
 
     if (customers.length === 0) {
+      const syncDuration = Date.now() - syncStartTime;
+      await updateSyncHistory(
+        companyGuid,
+        'customers',
+        0,
+        syncDuration,
+        syncMode,
+        fromDate,
+        toDate,
+        null
+      );
+      await logSyncToHistory(
+        companyGuid,
+        'customers',
+        new Date(syncStartTime),
+        0,
+        syncDuration,
+        syncMode,
+        fromDate,
+        toDate,
+        null
+      );
       return res.json({
         success: true,
         message: 'No customers found in Sundry Debtors group',
-        count: 0
+        count: 0,
+        syncMode,
+        syncReason,
+        fromDate,
+        toDate,
+        duration: `${Math.round(syncDuration / 1000)}s`
       });
     }
 
@@ -1260,11 +1627,41 @@ app.post('/api/sync/customers', async (req, res) => {
 
     console.log(`✅ Synced ${syncedCount} customers`);
 
+    const syncDuration = Date.now() - syncStartTime;
+
+    await updateSyncHistory(
+      companyGuid,
+      'customers',
+      syncedCount,
+      syncDuration,
+      syncMode,
+      fromDate,
+      toDate,
+      errors.length > 0 ? `${errors.length} errors during sync` : null
+    );
+
+    await logSyncToHistory(
+      companyGuid,
+      'customers',
+      new Date(syncStartTime),
+      syncedCount,
+      syncDuration,
+      syncMode,
+      fromDate,
+      toDate,
+      errors.length > 0 ? `${errors.length} errors` : null
+    );
+
     res.json({
       success: true,
       message: `Successfully synced ${syncedCount} customers from Tally`,
       count: syncedCount,
-      errors: errors.length > 0 ? errors : undefined
+      errors: errors.length > 0 ? errors : undefined,
+      syncMode,
+      syncReason,
+      fromDate,
+      toDate,
+      duration: `${Math.round(syncDuration / 1000)}s`
     });
 
     // Invalidate cache after successful sync
@@ -1277,6 +1674,21 @@ app.post('/api/sync/customers', async (req, res) => {
     }
   } catch (error) {
     console.error('Sync error:', error);
+    const syncDuration = Date.now() - syncStartTime;
+    const config = loadConfig();
+    if (config?.company?.guid) {
+      await logSyncToHistory(
+        config.company.guid,
+        'customers',
+        new Date(syncStartTime),
+        0,
+        syncDuration,
+        'failed',
+        null,
+        null,
+        error.message
+      );
+    }
     res.status(500).json({
       success: false,
       error: error.message,
@@ -2045,6 +2457,89 @@ function formatTallyDateForDisplay(tallyDate) {
   }
 }
 
+// ==================== PAYMENT REFERENCES SYNC ====================
+
+// Build payment reference records from recently-synced receipts
+async function syncPaymentReferences(companyGuid) {
+  if (!pool) throw new Error('Database not configured');
+
+  const result = await pool.query(
+    `
+      INSERT INTO payment_references (
+        company_guid,
+        payment_voucher_id,
+        payment_voucher_guid,
+        payment_voucher_number,
+        payment_date,
+        invoice_voucher_id,
+        invoice_voucher_guid,
+        invoice_voucher_number,
+        invoice_date,
+        allocated_amount,
+        allocation_type,
+        party_ledger_id,
+        party_name,
+        synced_from_tally
+      )
+      SELECT DISTINCT
+        pv.company_guid,
+        pv.id,
+        pv.voucher_guid,
+        pv.voucher_number,
+        pv.date,
+        iv.id,
+        iv.voucher_guid,
+        vli.reference_name,
+        vli.reference_date,
+        vli.reference_amount,
+        COALESCE(vli.reference_type, 'Against Reference'),
+        pv.party_ledger_id,
+        pv.party_name,
+        TRUE
+      FROM voucher_line_items vli
+      JOIN vouchers pv ON vli.voucher_id = pv.id
+      LEFT JOIN vouchers iv ON iv.voucher_number = vli.reference_name 
+        AND iv.company_guid = pv.company_guid
+        AND iv.party_ledger_id = pv.party_ledger_id
+      WHERE pv.company_guid = $1
+        AND pv.voucher_type IN ('RECEIPT', 'Payment Received')
+        AND vli.reference_name IS NOT NULL
+        AND vli.reference_amount IS NOT NULL
+        AND vli.reference_amount > 0
+        AND pv.synced_at > NOW() - INTERVAL '1 hour'
+      ON CONFLICT DO NOTHING
+    `,
+    [companyGuid]
+  );
+
+  return result.rowCount || 0;
+}
+
+// Manual trigger endpoint (used by auto-sync after transactions)
+app.post('/api/sync/payment-references', async (req, res) => {
+  try {
+    const config = loadConfig();
+    const companyGuid = config?.company?.guid;
+
+    if (!companyGuid) {
+      return res.json({
+        success: false,
+        error: 'Company not configured. Please run setup first.'
+      });
+    }
+
+    const inserted = await syncPaymentReferences(companyGuid);
+    res.json({
+      success: true,
+      message: `Payment references synced (${inserted} new)`,
+      count: inserted
+    });
+  } catch (error) {
+    console.error('Payment reference sync error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 
 // Sync transactions from Tally to PostgreSQL
 app.post('/api/sync/transactions', async (req, res) => {
@@ -2094,6 +2589,7 @@ app.post('/api/sync/transactions', async (req, res) => {
     let toDate = endDate || new Date().toISOString().split('T')[0];
     let syncMode = 'full';
     let syncReason = '';
+    let alteredAfter = null;
 
     // Check if we should run incremental or full sync
     const syncDecision = await shouldRunFullSync(companyGuid, 'transactions');
@@ -2121,14 +2617,19 @@ app.post('/api/sync/transactions', async (req, res) => {
       syncMode = 'incremental';
       syncReason = 'incremental';
       const lastSyncDate = new Date(syncDecision.lastSyncTime);
-      // Go back 1 day before last sync to catch any edge cases
-      lastSyncDate.setDate(lastSyncDate.getDate() - 1);
+      // Go back 2 hours before last sync to catch edge cases without re-syncing whole days
+      lastSyncDate.setHours(lastSyncDate.getHours() - 2);
       fromDate = lastSyncDate.toISOString().split('T')[0];
+      alteredAfter = formatTallyDate(lastSyncDate); // Use ALTERDATE for true incremental
       console.log(`⚡ INCREMENTAL sync - fetching only data since ${fromDate}`);
       console.log(`   Last successful sync: ${formatDateForDisplay(syncDecision.lastSyncTime)}`);
     }
 
     console.log(`📅 Syncing transactions from ${fromDate} to ${toDate}`);
+
+    // Tally expects YYYYMMDD format for date filters
+    const tallyFromDate = formatTallyDate(fromDate);
+    const tallyToDate = formatTallyDate(toDate);
 
     const xmlRequest = `
       <ENVELOPE>
@@ -2142,15 +2643,22 @@ app.post('/api/sync/transactions', async (req, res) => {
           <DESC>
             <STATICVARIABLES>
               <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
-              <SVFROMDATE>${fromDate}</SVFROMDATE>
-              <SVTODATE>${toDate}</SVTODATE>
+              <SVFROMDATE>${tallyFromDate}</SVFROMDATE>
+              <SVTODATE>${tallyToDate}</SVTODATE>
             </STATICVARIABLES>
             <TDL>
               <TDLMESSAGE>
                 <COLLECTION NAME="Voucher Collection">
                   <TYPE>Voucher</TYPE>
-                  <FETCH>GUID, VoucherNumber, VoucherTypeName, Date, PartyLedgerName, Amount, Narration, ALLINVENTORYENTRIES.LIST:STOCKITEMNAME, ALLINVENTORYENTRIES.LIST:ITEMCODE</FETCH>
+                  <FETCH>GUID, VoucherNumber, VoucherTypeName, Date, PartyLedgerName, Amount, Narration, AlteredOn, AlterId, ALLINVENTORYENTRIES.LIST:STOCKITEMNAME, ALLINVENTORYENTRIES.LIST:ITEMCODE</FETCH>
+                  ${alteredAfter ? '<FILTER>ModifiedSince</FILTER>' : ''}
                 </COLLECTION>
+                ${alteredAfter ? `
+                <SYSTEM TYPE="Formulae" NAME="ModifiedSince">
+                  $AlteredOn >= $$Date:##SVAlteredAfter
+                </SYSTEM>
+                <VARIABLE NAME="SVAlteredAfter" TYPE="Date">${alteredAfter}</VARIABLE>
+                ` : ''}
               </TDLMESSAGE>
             </TDL>
           </DESC>
@@ -2171,7 +2679,9 @@ app.post('/api/sync/transactions', async (req, res) => {
       return res.json({
         success: true,
         message: 'No transactions found in Tally for the specified period',
-        count: 0
+        count: 0,
+        syncMode,
+        syncReason
       });
     }
 
@@ -3700,6 +4210,155 @@ app.post('/api/analytics/calculate', async (req, res) => {
   }
 });
 
+// =====================================================
+// DASHBOARD API - Cached dashboard payload per company
+// =====================================================
+app.get('/api/company/:guid/dashboard', async (req, res) => {
+  const { guid } = req.params;
+
+  try {
+    console.log(`📊 Dashboard request for company: ${guid}`);
+
+    // Fetch cached dashboard metrics
+    const result = await pool.query(
+      `
+        SELECT 
+          metric_type,
+          metric_data,
+          calculated_at
+        FROM dashboard_cache
+        WHERE company_guid = $1
+          AND is_valid = TRUE
+          AND expires_at > NOW()
+          AND metric_type != 'test_metric'
+        ORDER BY metric_type
+      `,
+      [guid]
+    );
+
+    if (result.rows.length === 0) {
+      console.log('⚠️ No dashboard data found in cache');
+      return res.status(404).json({
+        error: 'No dashboard data found. Please sync first.',
+        company_guid: guid
+      });
+    }
+
+    // Fetch company name (best effort)
+    const companyResult = await pool.query(
+      'SELECT company_name FROM companies WHERE company_guid = $1',
+      [guid]
+    );
+
+    // Transform rows into a friendly response
+    const dashboard = {
+      company_guid: guid,
+      company_name: companyResult.rows[0]?.company_name || 'Unknown',
+      updated_at: result.rows[0].calculated_at
+    };
+
+    result.rows.forEach(row => {
+      dashboard[row.metric_type] = row.metric_data;
+    });
+
+    console.log(`✅ Dashboard sent: ${result.rows.length} metrics`);
+    res.json(dashboard);
+  } catch (error) {
+    console.error('❌ Dashboard API error:', error);
+    res.status(500).json({
+      error: error.message,
+      company_guid: guid
+    });
+  }
+});
+
+// =====================================================
+// DASHBOARD REFRESH - Invalidate cache (recalc on next sync)
+// =====================================================
+app.post('/api/company/:guid/dashboard/refresh', async (req, res) => {
+  const { guid } = req.params;
+
+  try {
+    console.log(`🔄 Dashboard refresh requested for: ${guid}`);
+
+    // Invalidate cached metrics for this company; next sync should repopulate
+    await pool.query(
+      `
+        UPDATE dashboard_cache
+        SET is_valid = FALSE
+        WHERE company_guid = $1
+      `,
+      [guid]
+    );
+
+    res.json({
+      message: 'Dashboard cache invalidated. Will recalculate on next sync.',
+      company_guid: guid
+    });
+  } catch (error) {
+    console.error('❌ Dashboard refresh error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// =====================================================
+// COMPANIES LIST (for dropdowns/mobile apps)
+// =====================================================
+app.get('/api/companies', async (req, res) => {
+  try {
+    console.log('📋 Companies list requested');
+
+    const result = await pool.query(`
+      SELECT 
+        company_guid,
+        company_name,
+        last_sync,
+        verified
+      FROM companies
+      ORDER BY company_name
+    `);
+
+    res.json({
+      count: result.rows.length,
+      companies: result.rows
+    });
+  } catch (error) {
+    console.error('❌ Companies API error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// =====================================================
+// HEALTH CHECK
+// =====================================================
+app.get('/api/health', async (req, res) => {
+  try {
+    // DB heartbeat
+    await pool.query('SELECT NOW()');
+
+    // Cache stats (best effort)
+    const cacheStats = await pool.query(`
+      SELECT 
+        COUNT(*)::int AS total_metrics,
+        COUNT(*) FILTER (WHERE is_valid AND metric_type != 'test_metric')::int AS valid_metrics,
+        COUNT(DISTINCT company_guid)::int AS companies_cached
+      FROM dashboard_cache
+    `);
+
+    res.json({
+      status: 'healthy',
+      timestamp: new Date().toISOString(),
+      database: 'connected',
+      cache: cacheStats.rows[0]
+    });
+  } catch (error) {
+    res.status(500).json({
+      status: 'unhealthy',
+      error: error.message
+    });
+  }
+});
+
 // ==================== AUTO-SYNC SCHEDULER ====================
 
 const SYNC_INTERVAL = 15 * 60 * 1000; // 15 minutes in milliseconds
@@ -3808,11 +4467,19 @@ async function autoSync() {
     const phase1Duration = Date.now() - phase1Start;
     console.log(`✅ Phase 1 completed in ${phase1Duration}ms`);
 
-    autoSyncStatus.results.vendors = { count: vendorResponse.data.count, success: true };
-    autoSyncStatus.results.customers = { count: customerResponse.data.count, success: true };
+    autoSyncStatus.results.vendors = {
+      count: vendorResponse.data.count,
+      success: true,
+      mode: vendorResponse.data.syncMode || 'full'
+    };
+    autoSyncStatus.results.customers = {
+      count: customerResponse.data.count,
+      success: true,
+      mode: customerResponse.data.syncMode || 'full'
+    };
 
-    console.log(`   Vendors: ${vendorResponse.data.count} synced`);
-    console.log(`   Customers: ${customerResponse.data.count} synced`);
+    console.log(`   Vendors: ${vendorResponse.data.count} synced (${vendorResponse.data.syncMode || 'full'} mode)`);
+    console.log(`   Customers: ${customerResponse.data.count} synced (${customerResponse.data.syncMode || 'full'} mode)`);
 
     // Sync transactions (incremental or full based on last sync)
     autoSyncStatus.currentStep = 'transactions';
@@ -3827,6 +4494,16 @@ async function autoSync() {
       success: true
     };
     console.log(`✅ Transactions: ${txData.count} synced ${modeEmoji} (${txData.syncMode || 'full'} mode) ${txData.duration || ''}`);
+
+    // Sync payment references after voucher sync
+    autoSyncStatus.currentStep = 'payment_references';
+    console.log('✅ Syncing payment references...');
+    const prResponse = await axios.post(`http://localhost:${PORT}/api/sync/payment-references`);
+    autoSyncStatus.results.payment_references = {
+      count: prResponse.data.count,
+      success: prResponse.data.success !== false
+    };
+    console.log(`✅ Payment references: ${prResponse.data.count} inserted`);
 
     // Calculate analytics
     autoSyncStatus.currentStep = 'analytics';
@@ -3945,6 +4622,3 @@ process.on('SIGINT', () => {
     });
   });
 });
-
-
-
