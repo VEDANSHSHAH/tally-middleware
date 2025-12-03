@@ -1,12 +1,12 @@
 -- =====================================================
--- DATA MIGRATION: MIGRATE VENDORS → LEDGERS
+-- DATA MIGRATION: MIGRATE VENDORS -> LEDGERS
 -- =====================================================
 
 DO $$
 DECLARE
     migrated_count INTEGER := 0;
 BEGIN
-    RAISE NOTICE '📦 Starting vendors migration...';
+    RAISE NOTICE 'Starting vendors migration...';
     
     IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'vendors') THEN
         INSERT INTO ledgers (
@@ -47,9 +47,8 @@ BEGIN
         );
         
         GET DIAGNOSTICS migrated_count = ROW_COUNT;
-        RAISE NOTICE '✅ Migrated % vendors to ledgers', migrated_count;
+        RAISE NOTICE 'Migrated % vendors to ledgers', migrated_count;
     ELSE
-        RAISE NOTICE '⚠️ vendors table not found, skipping...';
+        RAISE NOTICE 'vendors table not found, skipping...';
     END IF;
 END $$;
-

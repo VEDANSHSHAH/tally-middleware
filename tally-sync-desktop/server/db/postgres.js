@@ -8,12 +8,12 @@ const result = require('dotenv').config({ path: envPath });
 if (result.error) {
   console.error('Error loading .env:', result.error);
 } else {
-  console.log('✅ Environment variables loaded:', Object.keys(result.parsed || {}));
+  console.log('[OK] Environment variables loaded:', Object.keys(result.parsed || {}));
 }
 console.log('DATABASE_URL exists?', !!process.env.DATABASE_URL);
 
 if (!process.env.DATABASE_URL) {
-  console.warn('⚠️ WARNING: DATABASE_URL not found in environment variables!');
+  console.warn('[WARN] WARNING: DATABASE_URL not found in environment variables!');
   console.warn('   Server will start but database operations will fail.');
   console.warn('   Please create a .env file in the root directory with:');
   console.warn('   DATABASE_URL=your_postgres_connection_string');
@@ -32,25 +32,25 @@ if (pool) {
   
   pool.on('connect', () => {
     if (isFirstConnection) {
-      console.log('✅ Connected to PostgreSQL (Neon)');
+      console.log('[OK] Connected to PostgreSQL (Neon)');
       isFirstConnection = false;
     }
   });
 
   pool.on('error', (err) => {
-    console.error('❌ PostgreSQL connection error:', err);
+    console.error('[ERROR] PostgreSQL connection error:', err);
   });
 
   // Verify connection on startup
   pool.query('SELECT NOW()', (err, res) => {
     if (err) {
-      console.error('❌ Database connection test failed:', err.message);
+      console.error('[ERROR] Database connection test failed:', err.message);
     } else {
-      console.log('✅ Database connection verified');
+      console.log('[OK] Database connection verified');
     }
   });
 } else {
-  console.warn('⚠️ Database pool not initialized (DATABASE_URL missing)');
+  console.warn('[WARN] Database pool not initialized (DATABASE_URL missing)');
 }
 
 // Create tables if they don't exist
@@ -83,7 +83,7 @@ const initDB = async () => {
       CREATE INDEX IF NOT EXISTS idx_vendor_name ON vendors(name);
       CREATE INDEX IF NOT EXISTS idx_vendor_business ON vendors(business_id);
     `);
-    console.log('✅ Vendors table initialized');
+    console.log('[OK] Vendors table initialized');
 
     // Create customers table
     await pool.query(`
@@ -108,7 +108,7 @@ const initDB = async () => {
       CREATE INDEX IF NOT EXISTS idx_customer_name ON customers(name);
       CREATE INDEX IF NOT EXISTS idx_customer_business ON customers(business_id);
     `);
-    console.log('✅ Customers table initialized');
+    console.log('[OK] Customers table initialized');
 
     // Create transactions table
     await pool.query(`
@@ -148,7 +148,7 @@ const initDB = async () => {
       CREATE INDEX IF NOT EXISTS idx_transaction_party ON transactions(party_name);
       CREATE INDEX IF NOT EXISTS idx_transaction_business ON transactions(business_id);
     `);
-    console.log('✅ Transactions table initialized');
+    console.log('[OK] Transactions table initialized');
 
     // Create groups table
     await pool.query(`
@@ -173,7 +173,7 @@ const initDB = async () => {
       CREATE INDEX IF NOT EXISTS idx_groups_primary ON groups(primary_group);
       CREATE INDEX IF NOT EXISTS idx_groups_name ON groups(name);
     `);
-    console.log('✅ Groups table initialized');
+    console.log('[OK] Groups table initialized');
 
     // Create ledgers table
     await pool.query(`
@@ -200,7 +200,7 @@ const initDB = async () => {
       CREATE INDEX IF NOT EXISTS idx_ledgers_revenue ON ledgers(is_revenue) WHERE is_revenue = TRUE;
       CREATE INDEX IF NOT EXISTS idx_ledgers_name ON ledgers(name);
     `);
-    console.log('✅ Ledgers table initialized');
+    console.log('[OK] Ledgers table initialized');
 
     // Add company_guid to transactions if it doesn't exist
     await pool.query(`
@@ -227,7 +227,7 @@ const initDB = async () => {
     await pool.query(`
       CREATE INDEX IF NOT EXISTS idx_companies_guid ON companies(company_guid);
     `);
-    console.log('✅ Companies table initialized');
+    console.log('[OK] Companies table initialized');
 
     // Add company_guid columns if they don't exist
     await pool.query(`
@@ -261,15 +261,15 @@ const initDB = async () => {
         END IF;
       END $$;
     `);
-    console.log('✅ Company GUID columns added');
+    console.log('[OK] Company GUID columns added');
 
-    console.log('✅ Database tables initialized successfully');
+    console.log('[OK] Database tables initialized successfully');
 
     // Update constraints for data bifurcation
     await updateSchemaConstraints();
 
   } catch (error) {
-    console.error('❌ Database initialization error:', error.message);
+    console.error('[ERROR] Database initialization error:', error.message);
     throw error;
   }
 };
@@ -277,7 +277,7 @@ const initDB = async () => {
 // Update constraints to allow same GUID for different companies
 const updateSchemaConstraints = async () => {
   try {
-    console.log('🔄 Checking schema constraints...');
+    console.log(' Checking schema constraints...');
 
     // Vendors
     await pool.query(`
@@ -327,9 +327,9 @@ const updateSchemaConstraints = async () => {
       END $$;
     `);
 
-    console.log('✅ Schema constraints updated for data bifurcation');
+    console.log('[OK] Schema constraints updated for data bifurcation');
   } catch (error) {
-    console.error('❌ Error updating schema constraints:', error.message);
+    console.error('[ERROR] Error updating schema constraints:', error.message);
     // Don't throw, just log - might fail if data violates new constraint (duplicates)
   }
 };
@@ -340,7 +340,7 @@ async function refreshMaterializedViews() {
     return { success: false, error: 'DATABASE_URL not configured' };
   }
   try {
-    console.log('dY"S Refreshing materialized views...');
+    console.log('[REFRESH] Refreshing materialized views...');
     const start = Date.now();
     await Promise.all([
       pool.query('REFRESH MATERIALIZED VIEW CONCURRENTLY mv_vendor_aging_summary'),
@@ -348,18 +348,18 @@ async function refreshMaterializedViews() {
       pool.query('REFRESH MATERIALIZED VIEW CONCURRENTLY mv_daily_summary')
     ]);
     const duration = Date.now() - start;
-    console.log(`�o. Materialized views refreshed in ${duration}ms`);
+    console.log(`[OK] Materialized views refreshed in ${duration}ms`);
     return { success: true, duration };
   } catch (error) {
-    console.warn('�s��,? Concurrent refresh failed, retrying without CONCURRENTLY:', error.message);
+    console.warn('Concurrent refresh failed, retrying without CONCURRENTLY:', error.message);
     try {
       await pool.query('REFRESH MATERIALIZED VIEW mv_vendor_aging_summary');
       await pool.query('REFRESH MATERIALIZED VIEW mv_customer_aging_summary');
       await pool.query('REFRESH MATERIALIZED VIEW mv_daily_summary');
-      console.log('�o. Materialized views refreshed (non-concurrent)');
+      console.log('[OK] Materialized views refreshed (non-concurrent)');
       return { success: true, fallback: true };
     } catch (retryError) {
-      console.error('�?O Materialized view refresh failed:', retryError.message);
+      console.error('Materialized view refresh failed:', retryError.message);
       return { success: false, error: retryError.message };
     }
   }

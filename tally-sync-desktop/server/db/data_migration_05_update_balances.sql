@@ -6,7 +6,7 @@ DO $$
 DECLARE
     updated_count INTEGER := 0;
 BEGIN
-    RAISE NOTICE '📊 Recalculating ledger balances from line items...';
+    RAISE NOTICE 'Recalculating ledger balances from line items...';
     
     UPDATE ledgers l
     SET current_balance = COALESCE((
@@ -19,6 +19,5 @@ BEGIN
     );
     
     GET DIAGNOSTICS updated_count = ROW_COUNT;
-    RAISE NOTICE '✅ Updated balances for % ledgers', updated_count;
+    RAISE NOTICE 'Updated balances for % ledgers', updated_count;
 END $$;
-

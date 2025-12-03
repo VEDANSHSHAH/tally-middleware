@@ -1,12 +1,12 @@
 -- =====================================================
--- DATA MIGRATION: MIGRATE CUSTOMERS → LEDGERS
+-- DATA MIGRATION: MIGRATE CUSTOMERS -> LEDGERS
 -- =====================================================
 
 DO $$
 DECLARE
     migrated_count INTEGER := 0;
 BEGIN
-    RAISE NOTICE '📦 Starting customers migration...';
+    RAISE NOTICE 'Starting customers migration...';
     
     IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'customers') THEN
         INSERT INTO ledgers (
@@ -47,9 +47,8 @@ BEGIN
         );
         
         GET DIAGNOSTICS migrated_count = ROW_COUNT;
-        RAISE NOTICE '✅ Migrated % customers to ledgers', migrated_count;
+        RAISE NOTICE 'Migrated % customers to ledgers', migrated_count;
     ELSE
-        RAISE NOTICE '⚠️ customers table not found, skipping...';
+        RAISE NOTICE 'customers table not found, skipping...';
     END IF;
 END $$;
-

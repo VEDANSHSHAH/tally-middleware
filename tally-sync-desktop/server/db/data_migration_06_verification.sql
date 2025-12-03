@@ -58,7 +58,7 @@ DECLARE
     missing_ledgers INTEGER;
 BEGIN
     RAISE NOTICE '';
-    RAISE NOTICE '🔍 Running data integrity checks...';
+    RAISE NOTICE 'Running data integrity checks...';
     RAISE NOTICE '';
     
     -- Check 1: Unbalanced vouchers (debit != credit)
@@ -71,9 +71,9 @@ BEGIN
     ) unbalanced;
     
     IF unbalanced_count > 0 THEN
-        RAISE WARNING '⚠️ Found % unbalanced vouchers (debit ≠ credit)', unbalanced_count;
+        RAISE WARNING 'Found % unbalanced vouchers (debit != credit)', unbalanced_count;
     ELSE
-        RAISE NOTICE '✅ All vouchers are balanced';
+        RAISE NOTICE 'All vouchers are balanced';
     END IF;
     
     -- Check 2: Orphan line items (voucher_id doesn't exist)
@@ -84,9 +84,9 @@ BEGIN
     );
     
     IF orphan_lines > 0 THEN
-        RAISE WARNING '⚠️ Found % orphan line items', orphan_lines;
+        RAISE WARNING 'Found % orphan line items', orphan_lines;
     ELSE
-        RAISE NOTICE '✅ No orphan line items found';
+        RAISE NOTICE 'No orphan line items found';
     END IF;
     
     -- Check 3: Missing ledger references
@@ -97,11 +97,10 @@ BEGIN
     );
     
     IF missing_ledgers > 0 THEN
-        RAISE WARNING '⚠️ Found % line items with invalid ledger_id', missing_ledgers;
+        RAISE WARNING 'Found % line items with invalid ledger_id', missing_ledgers;
     ELSE
-        RAISE NOTICE '✅ All ledger references are valid';
+        RAISE NOTICE 'All ledger references are valid';
     END IF;
     
     RAISE NOTICE '';
 END $$;
-

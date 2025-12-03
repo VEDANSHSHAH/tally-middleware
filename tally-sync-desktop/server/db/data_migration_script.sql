@@ -32,14 +32,14 @@ BEGIN
 END $$;
 
 -- =====================================================
--- 2. MIGRATE VENDORS → LEDGERS
+-- 2. MIGRATE VENDORS -> LEDGERS
 -- =====================================================
 
 DO $$
 DECLARE
     migrated_count INTEGER := 0;
 BEGIN
-    RAISE NOTICE '📦 Starting vendors migration...';
+    RAISE NOTICE 'Starting vendors migration...';
     
     IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'vendors') THEN
         INSERT INTO ledgers (
@@ -80,21 +80,21 @@ BEGIN
         );
         
         GET DIAGNOSTICS migrated_count = ROW_COUNT;
-        RAISE NOTICE '✅ Migrated % vendors to ledgers', migrated_count;
+        RAISE NOTICE 'Migrated % vendors to ledgers', migrated_count;
     ELSE
-        RAISE NOTICE '⚠️ vendors table not found, skipping...';
+        RAISE NOTICE 'vendors table not found, skipping...';
     END IF;
 END $$;
 
 -- =====================================================
--- 3. MIGRATE CUSTOMERS → LEDGERS
+-- 3. MIGRATE CUSTOMERS -> LEDGERS
 -- =====================================================
 
 DO $$
 DECLARE
     migrated_count INTEGER := 0;
 BEGIN
-    RAISE NOTICE '📦 Starting customers migration...';
+    RAISE NOTICE 'Starting customers migration...';
     
     IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'customers') THEN
         INSERT INTO ledgers (
@@ -135,14 +135,14 @@ BEGIN
         );
         
         GET DIAGNOSTICS migrated_count = ROW_COUNT;
-        RAISE NOTICE '✅ Migrated % customers to ledgers', migrated_count;
+        RAISE NOTICE 'Migrated % customers to ledgers', migrated_count;
     ELSE
-        RAISE NOTICE '⚠️ customers table not found, skipping...';
+        RAISE NOTICE 'customers table not found, skipping...';
     END IF;
 END $$;
 
 -- =====================================================
--- 4. MIGRATE TRANSACTIONS → VOUCHERS + LINE ITEMS
+-- 4. MIGRATE TRANSACTIONS -> VOUCHERS + LINE ITEMS
 -- =====================================================
 
 DO $$
@@ -155,7 +155,7 @@ DECLARE
     sales_ledger_id INTEGER;
     company_guid_temp VARCHAR(255);
 BEGIN
-    RAISE NOTICE '📦 Starting transactions migration...';
+    RAISE NOTICE 'Starting transactions migration...';
     
     IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'transactions') THEN
         
@@ -186,7 +186,7 @@ BEGIN
                 )
                 RETURNING id INTO sales_ledger_id;
                 
-                RAISE NOTICE '📝 Created default "Sales" ledger for company %', company_guid_temp;
+                RAISE NOTICE 'Created default "Sales" ledger for company %', company_guid_temp;
             END IF;
         END LOOP;
         
@@ -326,9 +326,9 @@ BEGIN
             END IF;
         END LOOP;
         
-        RAISE NOTICE '✅ Migrated % vouchers and % line items', migrated_vouchers, migrated_lines;
+        RAISE NOTICE 'Migrated % vouchers and % line items', migrated_vouchers, migrated_lines;
     ELSE
-        RAISE NOTICE '⚠️ transactions table not found, skipping...';
+        RAISE NOTICE 'transactions table not found, skipping...';
     END IF;
 END $$;
 
@@ -340,7 +340,7 @@ DO $$
 DECLARE
     updated_count INTEGER := 0;
 BEGIN
-    RAISE NOTICE '📊 Recalculating ledger balances from line items...';
+    RAISE NOTICE 'Recalculating ledger balances from line items...';
     
     UPDATE ledgers l
     SET current_balance = COALESCE((
@@ -353,7 +353,7 @@ BEGIN
     );
     
     GET DIAGNOSTICS updated_count = ROW_COUNT;
-    RAISE NOTICE '✅ Updated balances for % ledgers', updated_count;
+    RAISE NOTICE 'Updated balances for % ledgers', updated_count;
 END $$;
 
 -- =====================================================
@@ -416,7 +416,7 @@ DECLARE
     missing_ledgers INTEGER;
 BEGIN
     RAISE NOTICE '';
-    RAISE NOTICE '🔍 Running data integrity checks...';
+    RAISE NOTICE 'Running data integrity checks...';
     RAISE NOTICE '';
     
     -- Check 1: Unbalanced vouchers (debit != credit)
@@ -429,9 +429,9 @@ BEGIN
     ) unbalanced;
     
     IF unbalanced_count > 0 THEN
-        RAISE WARNING '⚠️ Found % unbalanced vouchers (debit ≠ credit)', unbalanced_count;
+        RAISE WARNING 'Found % unbalanced vouchers (debit != credit)', unbalanced_count;
     ELSE
-        RAISE NOTICE '✅ All vouchers are balanced';
+        RAISE NOTICE 'All vouchers are balanced';
     END IF;
     
     -- Check 2: Orphan line items (voucher_id doesn't exist)
@@ -442,9 +442,9 @@ BEGIN
     );
     
     IF orphan_lines > 0 THEN
-        RAISE WARNING '⚠️ Found % orphan line items', orphan_lines;
+        RAISE WARNING 'Found % orphan line items', orphan_lines;
     ELSE
-        RAISE NOTICE '✅ No orphan line items found';
+        RAISE NOTICE 'No orphan line items found';
     END IF;
     
     -- Check 3: Missing ledger references
@@ -455,9 +455,9 @@ BEGIN
     );
     
     IF missing_ledgers > 0 THEN
-        RAISE WARNING '⚠️ Found % line items with invalid ledger_id', missing_ledgers;
+        RAISE WARNING 'Found % line items with invalid ledger_id', missing_ledgers;
     ELSE
-        RAISE NOTICE '✅ All ledger references are valid';
+        RAISE NOTICE 'All ledger references are valid';
     END IF;
     
     RAISE NOTICE '';
@@ -474,15 +474,15 @@ BEGIN
     RAISE NOTICE '=====================================================';
     RAISE NOTICE '';
     RAISE NOTICE 'Next Steps:';
-    RAISE NOTICE '  1. ✅ Review the migration summary above';
-    RAISE NOTICE '  2. ✅ Check data integrity warnings (if any)';
-    RAISE NOTICE '  3. ⚠️  Test queries on new structure';
-    RAISE NOTICE '  4. ⚠️  Update backend sync code';
-    RAISE NOTICE '  5. ⚠️  Update API endpoints';
-    RAISE NOTICE '  6. ⚠️  Test with Tally sync';
+    RAISE NOTICE '  1. Review the migration summary above';
+    RAISE NOTICE '  2. Check data integrity warnings (if any)';
+    RAISE NOTICE '  3. Test queries on new structure';
+    RAISE NOTICE '  4. Update backend sync code';
+    RAISE NOTICE '  5. Update API endpoints';
+    RAISE NOTICE '  6. Test with Tally sync';
     RAISE NOTICE '';
     RAISE NOTICE 'After thorough testing:';
-    RAISE NOTICE '  7. 🗑️  Drop old tables (ONLY after testing!):';
+    RAISE NOTICE '  7. Drop old tables (ONLY after testing!):';
     RAISE NOTICE '      DROP TABLE transactions CASCADE;';
     RAISE NOTICE '      DROP TABLE vendors CASCADE;';
     RAISE NOTICE '      DROP TABLE customers CASCADE;';

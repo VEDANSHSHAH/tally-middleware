@@ -1,5 +1,5 @@
 -- =====================================================
--- DATA MIGRATION: MIGRATE TRANSACTIONS → VOUCHERS + LINE ITEMS
+-- DATA MIGRATION: MIGRATE TRANSACTIONS -> VOUCHERS + LINE ITEMS
 -- =====================================================
 
 DO $$
@@ -12,7 +12,7 @@ DECLARE
     sales_ledger_id INTEGER;
     company_guid_temp VARCHAR(255);
 BEGIN
-    RAISE NOTICE '📦 Starting transactions migration...';
+    RAISE NOTICE 'Starting transactions migration...';
     
     IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'transactions') THEN
         
@@ -43,7 +43,7 @@ BEGIN
                 )
                 RETURNING id INTO sales_ledger_id;
                 
-                RAISE NOTICE '📝 Created default "Sales" ledger for company %', company_guid_temp;
+                RAISE NOTICE 'Created default "Sales" ledger for company %', company_guid_temp;
             END IF;
         END LOOP;
         
@@ -183,9 +183,8 @@ BEGIN
             END IF;
         END LOOP;
         
-        RAISE NOTICE '✅ Migrated % vouchers and % line items', migrated_vouchers, migrated_lines;
+        RAISE NOTICE 'Migrated % vouchers and % line items', migrated_vouchers, migrated_lines;
     ELSE
-        RAISE NOTICE '⚠️ transactions table not found, skipping...';
+        RAISE NOTICE 'transactions table not found, skipping...';
     END IF;
 END $$;
-
