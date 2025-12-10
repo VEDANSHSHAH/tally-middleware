@@ -7,8 +7,21 @@ const extractValue = (value) => {
   return value;
 };
 
-async function getCompanyInfo() {
+const escapeXml = (value) => {
+  if (value === undefined || value === null) return '';
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+};
+
+async function getCompanyInfo(preferredCompanyName = null) {
   const tallyUrl = process.env.TALLY_URL || 'http://localhost:9000';
+  const companyTag = preferredCompanyName
+    ? `<SVCURRENTCOMPANY>${escapeXml(preferredCompanyName)}</SVCURRENTCOMPANY>`
+    : '';
   
   // Method 1: Simple Collection request - SAFE, won't crash Tally
   const xmlRequest1 = `
@@ -18,11 +31,12 @@ async function getCompanyInfo() {
         <TALLYREQUEST>Export</TALLYREQUEST>
         <TYPE>Collection</TYPE>
         <ID>CompanyCollection</ID>
-      </HEADER>
+        </HEADER>
       <BODY>
         <DESC>
           <STATICVARIABLES>
             <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+            ${companyTag}
           </STATICVARIABLES>
           <TDL>
             <TDLMESSAGE>
@@ -51,6 +65,7 @@ async function getCompanyInfo() {
         <DESC>
           <STATICVARIABLES>
             <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+            ${companyTag}
           </STATICVARIABLES>
           <TDL>
             <TDLMESSAGE>
@@ -79,6 +94,7 @@ async function getCompanyInfo() {
         <DESC>
           <STATICVARIABLES>
             <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+            ${companyTag}
           </STATICVARIABLES>
           <TDL>
             <TDLMESSAGE>
@@ -127,6 +143,15 @@ async function getCompanyInfo() {
       }
       if (!guid && company?.GUID?._) {
         guid = company.GUID._;
+      }
+      if (!guid) {
+        guid = extractValue(company?.REMOTECMPID) || company?.$?.REMOTECMPID;
+      }
+      if (!guid) {
+        guid = extractValue(company?.REMOTECMPID) || company?.$?.REMOTECMPID;
+      }
+      if (!guid) {
+        guid = extractValue(company?.REMOTECMPID) || company?.$?.REMOTECMPID;
       }
       
       let name = extractValue(company?.NAME);
@@ -220,6 +245,7 @@ async function getCompanyInfo() {
           <DESC>
             <STATICVARIABLES>
               <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+              ${companyTag}
             </STATICVARIABLES>
             <TDL>
               <TDLMESSAGE>
@@ -292,6 +318,9 @@ async function getCompanyInfo() {
           if (!guid && company?.GUID?._) {
             guid = company.GUID._;
           }
+          if (!guid) {
+            guid = extractValue(company?.REMOTECMPID) || company?.$?.REMOTECMPID;
+          }
           
           if (guid) {
             console.log(`✅ Detected CURRENT Company (Method 4 - Matched by name): ${name}`);
@@ -310,6 +339,9 @@ async function getCompanyInfo() {
     }
     if (!guid && company?.GUID?._) {
       guid = company.GUID._;
+    }
+    if (!guid) {
+      guid = extractValue(company?.REMOTECMPID) || company?.$?.REMOTECMPID;
     }
     
     let name = extractValue(company?.NAME);
@@ -341,8 +373,11 @@ async function getCompanyInfo() {
 }
 
 // Get all companies from Tally
-async function getAllCompanies() {
+async function getAllCompanies(preferredCompanyName = null) {
   const tallyUrl = process.env.TALLY_URL || 'http://localhost:9000';
+  const companyTag = preferredCompanyName
+    ? `<SVCURRENTCOMPANY>${escapeXml(preferredCompanyName)}</SVCURRENTCOMPANY>`
+    : '';
   
   const xmlRequest = `
     <ENVELOPE>
@@ -356,6 +391,7 @@ async function getAllCompanies() {
         <DESC>
           <STATICVARIABLES>
             <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+            ${companyTag}
           </STATICVARIABLES>
           <TDL>
             <TDLMESSAGE>
@@ -434,4 +470,3 @@ async function getAllCompanies() {
 }
 
 module.exports = { getCompanyInfo, getAllCompanies };
-

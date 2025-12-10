@@ -23,7 +23,8 @@ const pool = process.env.DATABASE_URL ? new Pool({
   connectionString: process.env.DATABASE_URL,
   max: 20, // Maximum pool size
   idleTimeoutMillis: 30000, // Close idle connections after 30s
-  connectionTimeoutMillis: 2000 // Connection timeout
+  // Neon/remote Postgres can take a few seconds to wake up; allow more time before failing
+  connectionTimeoutMillis: 10000 // Connection timeout
 }) : null;
 
 // Test connection only once on startup

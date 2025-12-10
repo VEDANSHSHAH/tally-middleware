@@ -6,23 +6,58 @@ const xml2js = require('xml2js');
 const fs = require('fs');
 const path = require('path');
 
-// Load environment variables from root directory
-const envPath = path.resolve(__dirname, '../../..', '.env');
-console.log('Loading .env from:', envPath);
-const envResult = require('dotenv').config({ path: envPath });
-if (envResult.error) {
-  console.warn('⚠️ Could not load .env file:', envResult.error.message);
-  console.warn('   Trying current directory...');
-  require('dotenv').config(); // Fallback to current directory
-} else {
-  console.log('✅ Environment variables loaded from:', envPath);
+// Load environment variables from the repo root with fallbacks
+const envCandidates = [
+  path.resolve(__dirname, '../..', '.env'),
+  path.resolve(__dirname, '..', '.env'),
+  path.resolve(__dirname, '../../..', '.env')
+];
+
+let envLoadedFrom = null;
+for (const candidate of envCandidates) {
+  if (!fs.existsSync(candidate)) continue;
+  const result = require('dotenv').config({ path: candidate });
+  if (!result.error) {
+    envLoadedFrom = candidate;
+    break;
+  }
+  console.warn('Could not load .env at', candidate, '-', result.error.message);
 }
 
+if (!envLoadedFrom) {
+  const fallback = require('dotenv').config();
+  if (!fallback.error) {
+    envLoadedFrom = path.resolve(process.cwd(), '.env');
+  } else {
+    console.warn('Could not load .env from any known location:', fallback.error.message);
+  }
+}
+
+if (envLoadedFrom) {
+  console.log('Environment variables loaded from:', envLoadedFrom);
+}
 const { pool, initDB, refreshMaterializedViews } = require('./db/postgres');
 const { getCompanyInfo, getAllCompanies } = require('./tally/companyInfo');
 const cache = require('./cache');
 const { updateProgress, getProgress, resetProgress } = require('./syncProgress');
 const { installMaterializedViews, refreshAllViews, checkMaterializedViewsExist } = require('./db/install-materialized-views');
+
+let voucherRoutes = null;
+try {
+  voucherRoutes = require('./sync/voucherRoutes');
+  console.log('✅ Voucher sync routes loaded');
+} catch (err) {
+  console.warn('⚠️ Voucher sync routes not available:', err.message);
+}
+
+let agingRoutes = null;
+try {
+  agingRoutes = require('./analytics/agingRoutes');
+  console.log('✅ Aging routes loaded');
+} catch (err) {
+  console.warn('⚠️ Aging routes not available:', err.message);
+}
+
 
 // =====================================================
 // INCREMENTAL SYNC HELPERS
@@ -75,9 +110,37 @@ async function logSyncToHistory(companyGuid, dataType, syncStartedAt, recordsCou
   }
 }
 
+// Fallback: derive last sync from data tables if sync_history is empty/missing
+async function getFallbackLastSync(companyGuid, dataType) {
+	try {
+		if (!pool || !companyGuid) return null;
+		const tableMap = { vendors: 'vendors', customers: 'customers', transactions: 'transactions' };
+		const table = tableMap[dataType];
+		if (!table) return null;
+
+		const result = await pool.query(
+			`SELECT MAX(synced_at) AS last_sync FROM ${table} WHERE company_guid = $1`,
+			[companyGuid]
+		);
+		return result.rows[0]?.last_sync || null;
+	} catch (error) {
+		console.warn('Fallback last-sync lookup failed:', error.message);
+		return null;
+	}
+}
+
 // Check if this should be a full or incremental sync
 async function shouldRunFullSync(companyGuid, dataType) {
-  const lastSync = await getLastSyncTime(companyGuid, dataType);
+  let lastSync = await getLastSyncTime(companyGuid, dataType);
+
+  // If sync_history is empty, try to derive last sync directly from data
+  if (!lastSync) {
+    const fallback = await getFallbackLastSync(companyGuid, dataType);
+    if (fallback) {
+      lastSync = fallback;
+      console.log(`dY"< Using fallback last sync from ${dataType} table: ${new Date(lastSync).toLocaleString()}`);
+    }
+  }
 
   if (!lastSync) {
     console.log(`📋 No previous sync found for ${dataType} - Running FULL sync`);
@@ -116,6 +179,27 @@ function formatDateForDisplay(date) {
   return new Date(date).toLocaleString();
 }
 
+// Safely escape values before embedding into XML for Tally
+function escapeXml(value) {
+  if (value === undefined || value === null) return '';
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+}
+
+// Build SVCURRENTCOMPANY tag to force queries to run against the selected company
+function buildCompanyTag(companyName) {
+  if (!companyName) return '';
+  return `<SVCURRENTCOMPANY>${escapeXml(companyName)}</SVCURRENTCOMPANY>`;
+}
+
+function currentCompanyTag(config) {
+  return buildCompanyTag(config?.company?.name);
+}
+
 // ⭐ Import analytics functions
 const {
   calculateVendorSettlementCycles,
@@ -151,7 +235,8 @@ app.use(express.json());
 
 // Rate limiting (protect API and AI calls) using lightweight limiter
 const aiRateLimiter = makeSimpleRateLimiter({ windowMs: 60 * 1000, max: 10 });
-const generalRateLimiter = makeSimpleRateLimiter({ windowMs: 60 * 1000, max: 100 });
+// Desktop app calls many endpoints on load/poll; raise limit to avoid 429s
+const generalRateLimiter = makeSimpleRateLimiter({ windowMs: 60 * 1000, max: 500 });
 app.use('/api/ai/', aiRateLimiter);
 app.use('/api/', generalRateLimiter);
 
@@ -349,12 +434,52 @@ async function runAllMigrations() {
 
   // Install materialized views (auto-install on startup!)
   await installMaterializedViews();
+
+  // Backfill missing company_guid for legacy rows (helps incremental + filters)
+  await backfillCompanyGuidIfMissing();
 }
 
 // Auto-run migrations (safe to rerun; uses IF NOT EXISTS/ON CONFLICT guards)
 runAllMigrations().catch(err => {
   console.error('⚠️ Startup migrations failed (continuing):', err.message);
 });
+// Backfill missing company_guid values for single-company setups (helps filters + incremental sync)
+async function backfillCompanyGuidIfMissing() {
+  try {
+    if (!pool) return;
+    const config = loadConfig();
+    const companyGuid = config?.company?.guid;
+    if (!companyGuid) return;
+
+    const tables = ['vendors', 'customers', 'transactions'];
+    for (const table of tables) {
+      const distinct = await pool.query(
+        `SELECT COUNT(DISTINCT company_guid) AS distinct_count,
+                SUM(CASE WHEN company_guid IS NULL THEN 1 ELSE 0 END) AS null_count
+         FROM ${table}`
+      );
+      const distinctCount = Number(distinct.rows[0]?.distinct_count || 0);
+      const nullCount = Number(distinct.rows[0]?.null_count || 0);
+
+      if (nullCount === 0) continue;
+      if (distinctCount > 1) {
+        console.warn(`Skipping company_guid backfill for ${table}: multiple companies detected (${distinctCount})`);
+        continue;
+      }
+
+      const result = await pool.query(
+        `UPDATE ${table}
+         SET company_guid = $1, synced_at = COALESCE(synced_at, NOW())
+         WHERE company_guid IS NULL`,
+        [companyGuid]
+      );
+      console.log(`Backfilled company_guid for ${result.rowCount} ${table} row(s) with ${companyGuid}`);
+    }
+  } catch (error) {
+    console.warn('company_guid backfill skipped:', error.message);
+  }
+}
+
 // Helper function to query Tally with retry logic
 async function queryTally(xmlRequest, options = {}) {
   const {
@@ -405,9 +530,10 @@ async function queryTally(xmlRequest, options = {}) {
 }
 
 // Load group hierarchy either from database or directly from Tally (used for nested vendor/customer groups)
-async function loadGroupHierarchy(companyGuid) {
+async function loadGroupHierarchy(companyGuid, companyName) {
   const groupMap = new Map();
   if (!companyGuid) return groupMap;
+  const companyTag = buildCompanyTag(companyName);
 
   // Helper to add a group and track whether Sundry groups are present
   let hasSundryGroups = false;
@@ -462,6 +588,7 @@ async function loadGroupHierarchy(companyGuid) {
             <DESC>
               <STATICVARIABLES>
                 <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+                ${companyTag}
               </STATICVARIABLES>
               <TDL>
                 <TDLMESSAGE>
@@ -537,6 +664,8 @@ async function getBusinessMetadata(forceRefresh = false) {
   if (!forceRefresh && cachedBusinessMeta && cachedBusinessExpiry > now) {
     return cachedBusinessMeta;
   }
+  const config = loadConfig();
+  const companyTag = currentCompanyTag(config);
 
   const xmlRequest = `
     <ENVELOPE>
@@ -550,6 +679,7 @@ async function getBusinessMetadata(forceRefresh = false) {
         <DESC>
           <STATICVARIABLES>
             <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+            ${companyTag}
           </STATICVARIABLES>
           <TDL>
             <TDLMESSAGE>
@@ -642,6 +772,8 @@ app.get('/api/test-odbc', async (req, res) => {
   try {
     console.log('🔍 Testing ODBC connection to Tally...');
     const startTime = Date.now();
+    const config = loadConfig();
+    const companyTag = currentCompanyTag(config);
 
     // Try a simple request to Tally
     const testXml = `
@@ -656,6 +788,7 @@ app.get('/api/test-odbc', async (req, res) => {
           <DESC>
             <STATICVARIABLES>
               <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+              ${companyTag}
             </STATICVARIABLES>
             <TDL>
               <TDLMESSAGE>
@@ -737,7 +870,8 @@ app.get('/api/company/detect', async (req, res) => {
     console.log('🔍 Company detect endpoint called - fetching all companies');
     console.log(`📡 Connecting to Tally at: ${TALLY_URL}`);
 
-    const companies = await getAllCompanies();
+    const config = loadConfig();
+    const companies = await getAllCompanies(config?.company?.name);
     const responseTime = Date.now() - startTime;
 
     if (companies && companies.length > 0) {
@@ -794,7 +928,7 @@ app.post('/api/company/verify', async (req, res) => {
     }
 
     // Try to get info from Tally
-    const tallyInfo = await getCompanyInfo();
+    const tallyInfo = await getCompanyInfo(name);
 
     if (tallyInfo && tallyInfo.guid) {
       const tallyGuid = tallyInfo.guid.toLowerCase();
@@ -912,6 +1046,15 @@ app.post('/api/company/reset', (req, res) => {
   }
 });
 
+// ==================== VOUCHER SYNC (NEW - Normalized Tables) ====================
+if (voucherRoutes) {
+  app.use('/api/sync/vouchers', voucherRoutes);
+  app.use('/api/vouchers', voucherRoutes);
+}
+if (agingRoutes) {
+  app.use('/api/aging', agingRoutes);
+}
+
 // ==================== VENDORS ====================
 
 // Get all vendors from PostgreSQL
@@ -992,6 +1135,7 @@ app.post('/api/sync/vendors', async (req, res) => {
     // Get company GUID from config
     const config = loadConfig();
     const companyGuid = config?.company?.guid;
+    const companyTag = currentCompanyTag(config);
 
     if (!companyGuid) {
       return res.json({
@@ -1002,7 +1146,7 @@ app.post('/api/sync/vendors', async (req, res) => {
 
     // Verify that the currently open company in Tally matches the selected company
     console.log(`🔍 Checking Tally company... Selected: "${config.company.name}" (${companyGuid})`);
-    const tallyCompanyInfo = await getCompanyInfo();
+    const tallyCompanyInfo = await getCompanyInfo(config?.company?.name);
 
     if (!tallyCompanyInfo || !tallyCompanyInfo.guid) {
       return res.json({
@@ -1061,6 +1205,7 @@ app.post('/api/sync/vendors', async (req, res) => {
           <DESC>
             <STATICVARIABLES>
               <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+              ${companyTag}
             </STATICVARIABLES>
             <TDL>
               <TDLMESSAGE>
@@ -1128,7 +1273,7 @@ app.post('/api/sync/vendors', async (req, res) => {
       ledgerArray = Array.isArray(ledgers) ? ledgers : (ledgers ? [ledgers] : []);
     }
 
-    const groupHierarchy = await loadGroupHierarchy(companyGuid);
+    const groupHierarchy = await loadGroupHierarchy(companyGuid, config?.company?.name);
 
     // Filter to only get ledgers under Sundry Creditors (including nested groups)
     const vendors = ledgerArray.filter(ledger => {
@@ -1299,6 +1444,7 @@ app.get('/api/customers', async (req, res) => {
   try {
     const config = loadConfig();
     const companyGuid = config?.company?.guid;
+    const companyTag = currentCompanyTag(config);
     const { businessId } = req.query;
     let query = 'SELECT * FROM customers';
     const params = [];
@@ -1390,6 +1536,7 @@ app.post('/api/sync/customers', async (req, res) => {
     // Get company GUID from config
     const config = loadConfig();
     const companyGuid = config?.company?.guid;
+    const companyTag = currentCompanyTag(config);
 
     if (!companyGuid) {
       return res.json({
@@ -1400,7 +1547,7 @@ app.post('/api/sync/customers', async (req, res) => {
 
     // Verify that the currently open company in Tally matches the selected company
     console.log(`🔍 Checking Tally company... Selected: "${config.company.name}" (${companyGuid})`);
-    const tallyCompanyInfo = await getCompanyInfo();
+    const tallyCompanyInfo = await getCompanyInfo(config?.company?.name);
 
     if (!tallyCompanyInfo || !tallyCompanyInfo.guid) {
       return res.json({
@@ -1459,6 +1606,7 @@ app.post('/api/sync/customers', async (req, res) => {
           <DESC>
             <STATICVARIABLES>
               <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+              ${companyTag}
             </STATICVARIABLES>
             <TDL>
               <TDLMESSAGE>
@@ -1529,13 +1677,19 @@ app.post('/api/sync/customers', async (req, res) => {
     const groupHierarchy = await loadGroupHierarchy(companyGuid);
 
     // Filter to only get ledgers under Sundry Debtors (including nested groups)
-    const customers = ledgerArray.filter(ledger => {
+    let customers = ledgerArray.filter(ledger => {
       const parent = extractValue(ledger.PARENT) || ledger.PARENT;
       const parentName = typeof parent === 'string' ? parent.trim() : parent;
       return isUnderPrimaryGroup(parentName || '', 'Sundry Debtors', groupHierarchy);
     });
 
-    console.log(`Found ${customers.length} customers in Sundry Debtors group`);
+    // If hierarchy is empty or nothing matched, fall back to all ledgers to avoid dropping customers
+    if (customers.length === 0) {
+      console.warn('Sundry Debtors filter returned 0 customers; falling back to all ledgers from Tally response');
+      customers = Array.isArray(ledgerArray) ? ledgerArray : [];
+    }
+
+    console.log(`Found ${customers.length} customers in Sundry Debtors group (or fallback set)`);
 
     if (customers.length === 0) {
       const syncDuration = Date.now() - syncStartTime;
@@ -1999,7 +2153,7 @@ app.post('/api/sync/groups', async (req, res) => {
     }
 
     // Verify Tally company
-    const tallyCompanyInfo = await getCompanyInfo();
+    const tallyCompanyInfo = await getCompanyInfo(config?.company?.name);
     if (!tallyCompanyInfo || tallyCompanyInfo.guid.toLowerCase() !== companyGuid.toLowerCase()) {
       return res.json({
         success: false,
@@ -2129,7 +2283,7 @@ app.post('/api/sync/ledgers', async (req, res) => {
     }
 
     // Verify Tally company
-    const tallyCompanyInfo = await getCompanyInfo();
+    const tallyCompanyInfo = await getCompanyInfo(config?.company?.name);
     if (!tallyCompanyInfo || tallyCompanyInfo.guid.toLowerCase() !== companyGuid.toLowerCase()) {
       return res.json({
         success: false,
@@ -2559,7 +2713,7 @@ app.post('/api/sync/transactions', async (req, res) => {
 
     // Verify that the currently open company in Tally matches the selected company
     console.log(`🔍 Checking Tally company... Selected: "${config.company.name}" (${companyGuid})`);
-    const tallyCompanyInfo = await getCompanyInfo();
+    const tallyCompanyInfo = await getCompanyInfo(config?.company?.name);
 
     if (!tallyCompanyInfo || !tallyCompanyInfo.guid) {
       return res.json({
@@ -2631,7 +2785,8 @@ app.post('/api/sync/transactions', async (req, res) => {
     const tallyFromDate = formatTallyDate(fromDate);
     const tallyToDate = formatTallyDate(toDate);
 
-    const xmlRequest = `
+    // Build TDL so we can retry without AlteredOn when incremental returns empty
+    const buildTransactionRequest = (tallyFrom, tallyTo, alteredAfterDate) => `
       <ENVELOPE>
         <HEADER>
           <VERSION>1</VERSION>
@@ -2643,21 +2798,21 @@ app.post('/api/sync/transactions', async (req, res) => {
           <DESC>
             <STATICVARIABLES>
               <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
-              <SVFROMDATE>${tallyFromDate}</SVFROMDATE>
-              <SVTODATE>${tallyToDate}</SVTODATE>
+              <SVFROMDATE>${tallyFrom}</SVFROMDATE>
+              <SVTODATE>${tallyTo}</SVTODATE>
             </STATICVARIABLES>
             <TDL>
               <TDLMESSAGE>
                 <COLLECTION NAME="Voucher Collection">
                   <TYPE>Voucher</TYPE>
                   <FETCH>GUID, VoucherNumber, VoucherTypeName, Date, PartyLedgerName, Amount, Narration, AlteredOn, AlterId, ALLINVENTORYENTRIES.LIST:STOCKITEMNAME, ALLINVENTORYENTRIES.LIST:ITEMCODE</FETCH>
-                  ${alteredAfter ? '<FILTER>ModifiedSince</FILTER>' : ''}
+                  ${alteredAfterDate ? '<FILTER>ModifiedSince</FILTER>' : ''}
                 </COLLECTION>
-                ${alteredAfter ? `
+                ${alteredAfterDate ? `
                 <SYSTEM TYPE="Formulae" NAME="ModifiedSince">
                   $AlteredOn >= $$Date:##SVAlteredAfter
                 </SYSTEM>
-                <VARIABLE NAME="SVAlteredAfter" TYPE="Date">${alteredAfter}</VARIABLE>
+                <VARIABLE NAME="SVAlteredAfter" TYPE="Date">${alteredAfterDate}</VARIABLE>
                 ` : ''}
               </TDLMESSAGE>
             </TDL>
@@ -2669,24 +2824,70 @@ app.post('/api/sync/transactions', async (req, res) => {
     // Initial Tally API call: 15 minute timeout to detect if Tally is dead/unresponsive
     // If Tally is responding and data is coming, we'll get the data within this time
     // If Tally is completely dead, we'll error out after 15 minutes instead of waiting forever
-    const result = await queryTally(xmlRequest, {
+    let result = await queryTally(buildTransactionRequest(tallyFromDate, tallyToDate, alteredAfter), {
       timeout: 900000, // 15 minutes - enough for very large datasets, but detects if Tally is dead
       retries: 3, // Retry 3 times if connection fails
       queryType: 'transaction_sync'
     });
 
-    if (!result?.ENVELOPE?.BODY?.DATA?.COLLECTION?.VOUCHER) {
-      return res.json({
-        success: true,
-        message: 'No transactions found in Tally for the specified period',
-        count: 0,
-        syncMode,
-        syncReason
-      });
+    let vouchers = result?.ENVELOPE?.BODY?.DATA?.COLLECTION?.VOUCHER;
+    let voucherArray = Array.isArray(vouchers) ? vouchers : (vouchers ? [vouchers] : []);
+
+    // Incremental sometimes returns nothing because AlteredOn is blank; retry without the filter
+    if (syncMode === 'incremental' && alteredAfter && voucherArray.length === 0) {
+      console.warn('ƒsÿ‹,? Incremental transaction sync returned 0 vouchers; retrying without AlteredOn filter...');
+      try {
+        syncMode = 'incremental_fallback';
+        syncReason = 'incremental_empty';
+        result = await queryTally(buildTransactionRequest(tallyFromDate, tallyToDate, null), {
+          timeout: 900000,
+          retries: 2,
+          queryType: 'transaction_sync_incremental_fallback'
+        });
+        vouchers = result?.ENVELOPE?.BODY?.DATA?.COLLECTION?.VOUCHER;
+        voucherArray = Array.isArray(vouchers) ? vouchers : (vouchers ? [vouchers] : []);
+        console.log(`ƒo. Incremental fallback pulled ${voucherArray.length} vouchers`);
+      } catch (fallbackError) {
+        console.warn('ƒsÿ‹,? Incremental fallback failed:', fallbackError.message);
+      }
     }
 
-    const vouchers = result.ENVELOPE.BODY.DATA.COLLECTION.VOUCHER;
-    const voucherArray = Array.isArray(vouchers) ? vouchers : [vouchers];
+	    if (!voucherArray.length) {
+	      const syncDuration = Date.now() - syncStartTime;
+
+	      // Record "no changes" so incremental window advances instead of always redoing full sync
+	      await updateSyncHistory(
+	        companyGuid,
+	        'transactions',
+	        0,
+	        syncDuration,
+	        syncMode,
+	        fromDate,
+	        toDate,
+	        null
+	      );
+	      await logSyncToHistory(
+	        companyGuid,
+	        'transactions',
+	        new Date(syncStartTime),
+	        0,
+	        syncDuration,
+	        syncMode,
+	        fromDate,
+	        toDate,
+	        null
+	      );
+	      resetProgress('transaction');
+
+	      return res.json({
+	        success: true,
+	        message: 'No transactions found in Tally for the specified period',
+	        count: 0,
+	        syncMode,
+	        syncReason,
+	        duration: `${Math.round(syncDuration / 1000)}s`
+	      });
+	    }
 
     const totalTransactions = voucherArray.length;
     console.log(`Found ${totalTransactions} transactions - processing in batches (NO TIMEOUT - will sync until complete)...`);
