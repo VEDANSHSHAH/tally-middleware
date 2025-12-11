@@ -1,3 +1,19 @@
+"""
+TALLY AI - REFRESH SCHEDULER
+==============================
+Periodically refreshes AI summary tables with correct calculations.
+
+Fixes applied:
+1. Populates ai.customer_summary (was missing)
+2. Populates ai.business_overview with correct totals
+3. Uses correct outstanding formula: opening + sales - receipts
+4. Filters out Cash/Bank from customers
+5. Updates formatted columns for AI
+6. Calculates advances separately from receivables
+
+Run: every 5 minutes or on-demand after sync
+"""
+
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 import asyncpg
 import os
@@ -9,201 +25,473 @@ logger = logging.getLogger(__name__)
 
 
 async def get_db_pool():
-  return await asyncpg.create_pool(
-    os.getenv("DATABASE_URL"),
-    min_size=2,
-    max_size=10,
-  )
+    return await asyncpg.create_pool(
+        os.getenv("DATABASE_URL"),
+        min_size=2,
+        max_size=10,
+    )
 
 
-async def refresh_company_aging(company_guid: str):
-  pool = await get_db_pool()
-  try:
-    async with pool.acquire() as conn:
-      async with conn.transaction():
-        await conn.execute(
-          """
-          UPDATE vouchers v
-          SET 
-            amount_paid = COALESCE((
-              SELECT SUM(pr.allocated_amount)
-              FROM payment_references pr
-              WHERE pr.invoice_voucher_id = v.id AND pr.is_active = TRUE
-            ), 0),
-            amount_outstanding = v.total_amount - COALESCE((
-              SELECT SUM(pr.allocated_amount)
-              FROM payment_references pr
-              WHERE pr.invoice_voucher_id = v.id AND pr.is_active = TRUE
-            ), 0),
-            payment_status = CASE
-              WHEN v.is_cancelled THEN 'CANCELLED'
-              WHEN COALESCE((
-                SELECT SUM(pr.allocated_amount)
-                FROM payment_references pr
-                WHERE pr.invoice_voucher_id = v.id AND pr.is_active = TRUE
-              ), 0) >= v.total_amount THEN 'PAID'
-              WHEN COALESCE((
-                SELECT SUM(pr.allocated_amount)
-                FROM payment_references pr
-                WHERE pr.invoice_voucher_id = v.id AND pr.is_active = TRUE
-              ), 0) > 0 THEN 'PARTIAL'
-              ELSE 'UNPAID'
-            END,
-            aging_bucket = CASE 
-              WHEN CURRENT_DATE - COALESCE(v.due_date, v.date) <= 30 THEN '0-30'
-              WHEN CURRENT_DATE - COALESCE(v.due_date, v.date) <= 60 THEN '31-60'
-              WHEN CURRENT_DATE - COALESCE(v.due_date, v.date) <= 90 THEN '61-90'
-              ELSE '90+'
-            END,
-            payment_computed_at = NOW()
-          WHERE v.company_guid = $1
-            AND v.voucher_type IN ('SALES', 'Invoice')
-            AND v.is_cancelled = FALSE
-          """,
-          company_guid,
-        )
+# -----------------------------------------------------------------------------
+# REFRESH AI CUSTOMER SUMMARY
+# -----------------------------------------------------------------------------
 
-        await conn.execute(
-          """
-          UPDATE ledgers l
-          SET 
-            days_overdue = COALESCE(
-              CURRENT_DATE - (
-                SELECT MIN(v.date)
-                FROM vouchers v
-                WHERE v.party_ledger_id = l.id
-                  AND v.payment_status IN ('UNPAID', 'PARTIAL')
-              ), 
-              0
-            ),
-            aging_computed_at = NOW()
-          WHERE l.company_guid = $1
-            AND l.parent_group = 'Sundry Debtors'
-          """,
-          company_guid,
-        )
+async def refresh_customer_summary(company_guid: str):
+    """
+    Populate ai.customer_summary from vouchers and ledgers.
 
-        await conn.execute(
-          """
-          INSERT INTO dashboard_metrics (
-            company_guid, total_receivable, receivable_0_30,
-            receivable_31_60, receivable_61_90, receivable_90_plus,
-            customer_count, calculated_at, data_as_of_date
-          )
-          SELECT 
-            $1,
-            COALESCE((
-              SELECT SUM(current_balance) 
-              FROM ledgers 
-              WHERE company_guid = $1 
-                AND parent_group = 'Sundry Debtors' 
-                AND current_balance > 0
-            ), 0),
-            COALESCE((
-              SELECT SUM(amount_outstanding) 
-              FROM vouchers 
-              WHERE company_guid = $1 
-                AND aging_bucket = '0-30' 
-                AND payment_status IN ('UNPAID', 'PARTIAL')
-            ), 0),
-            COALESCE((
-              SELECT SUM(amount_outstanding) 
-              FROM vouchers 
-              WHERE company_guid = $1 
-                AND aging_bucket = '31-60' 
-                AND payment_status IN ('UNPAID', 'PARTIAL')
-            ), 0),
-            COALESCE((
-              SELECT SUM(amount_outstanding) 
-              FROM vouchers 
-              WHERE company_guid = $1 
-                AND aging_bucket = '61-90' 
-                AND payment_status IN ('UNPAID', 'PARTIAL')
-            ), 0),
-            COALESCE((
-              SELECT SUM(amount_outstanding) 
-              FROM vouchers 
-              WHERE company_guid = $1 
-                AND aging_bucket = '90+' 
-                AND payment_status IN ('UNPAID', 'PARTIAL')
-            ), 0),
-            COALESCE((
-              SELECT COUNT(*) 
-              FROM ledgers 
-              WHERE company_guid = $1 
-                AND parent_group = 'Sundry Debtors' 
-                AND current_balance > 0
-            ), 0),
-            NOW(), CURRENT_DATE
-          ON CONFLICT (company_guid, data_as_of_date) DO UPDATE SET
-            total_receivable = EXCLUDED.total_receivable,
-            receivable_0_30 = EXCLUDED.receivable_0_30,
-            receivable_31_60 = EXCLUDED.receivable_31_60,
-            receivable_61_90 = EXCLUDED.receivable_61_90,
-            receivable_90_plus = EXCLUDED.receivable_90_plus,
-            customer_count = EXCLUDED.customer_count,
-            calculated_at = EXCLUDED.calculated_at
-          """,
-          company_guid,
-        )
+    Critical:
+    - Outstanding = opening_balance + sales - receipts (NOT ledger.current_balance)
+    - Exclude Cash, Bank, Petty Cash from customers
+    """
+    pool = await get_db_pool()
+    try:
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                period_start = await conn.fetchval(
+                    """
+                    SELECT COALESCE(
+                        (SELECT MIN(date) FROM vouchers WHERE company_guid = $1),
+                        DATE_TRUNC('year', CURRENT_DATE)
+                    )
+                    """,
+                    company_guid,
+                )
 
-        logger.info(f"✅ Aging refreshed for {company_guid}")
-  except Exception as e:
-    logger.error(f"❌ Failed to refresh {company_guid}: {str(e)}")
-    raise
-  finally:
-    await pool.close()
+                period_end = await conn.fetchval(
+                    """
+                    SELECT COALESCE(
+                        (SELECT MAX(date) FROM vouchers WHERE company_guid = $1),
+                        CURRENT_DATE
+                    )
+                    """,
+                    company_guid,
+                )
+
+                await conn.execute(
+                    """
+                    DELETE FROM ai.customer_summary
+                    WHERE company_guid = $1
+                    """,
+                    company_guid,
+                )
+
+                await conn.execute(
+                    """
+                    INSERT INTO ai.customer_summary (
+                        company_guid,
+                        period_start,
+                        period_end,
+                        customer_name,
+                        customer_guid,
+                        opening_balance,
+                        sales_value,
+                        sales_count,
+                        receipts_value,
+                        receipts_count,
+                        outstanding_amount,
+                        current_balance,
+                        average_order_value,
+                        sales_rank,
+                        outstanding_rank,
+                        outstanding_formatted,
+                        sales_formatted,
+                        balance_status
+                    )
+                    SELECT
+                        $1 AS company_guid,
+                        $2 AS period_start,
+                        $3 AS period_end,
+                        l.name AS customer_name,
+                        l.guid AS customer_guid,
+                        COALESCE(l.opening_balance, 0) AS opening_balance,
+                        COALESCE((
+                            SELECT SUM(v.total_amount)
+                            FROM vouchers v
+                            WHERE v.party_ledger_id = l.id
+                              AND v.voucher_type IN ('Sales', 'SALES', 'Invoice', 'Sales Invoice')
+                              AND v.is_cancelled = FALSE
+                        ), 0) AS sales_value,
+                        COALESCE((
+                            SELECT COUNT(*)
+                            FROM vouchers v
+                            WHERE v.party_ledger_id = l.id
+                              AND v.voucher_type IN ('Sales', 'SALES', 'Invoice', 'Sales Invoice')
+                              AND v.is_cancelled = FALSE
+                        ), 0) AS sales_count,
+                        COALESCE((
+                            SELECT SUM(v.total_amount)
+                            FROM vouchers v
+                            WHERE v.party_ledger_id = l.id
+                              AND v.voucher_type IN ('Receipt', 'RECEIPT', 'Payment Received')
+                              AND v.is_cancelled = FALSE
+                        ), 0) AS receipts_value,
+                        COALESCE((
+                            SELECT COUNT(*)
+                            FROM vouchers v
+                            WHERE v.party_ledger_id = l.id
+                              AND v.voucher_type IN ('Receipt', 'RECEIPT', 'Payment Received')
+                              AND v.is_cancelled = FALSE
+                        ), 0) AS receipts_count,
+                        COALESCE(l.opening_balance, 0) +
+                        COALESCE((
+                            SELECT SUM(v.total_amount)
+                            FROM vouchers v
+                            WHERE v.party_ledger_id = l.id
+                              AND v.voucher_type IN ('Sales', 'SALES', 'Invoice', 'Sales Invoice')
+                              AND v.is_cancelled = FALSE
+                        ), 0) -
+                        COALESCE((
+                            SELECT SUM(v.total_amount)
+                            FROM vouchers v
+                            WHERE v.party_ledger_id = l.id
+                              AND v.voucher_type IN ('Receipt', 'RECEIPT', 'Payment Received')
+                              AND v.is_cancelled = FALSE
+                        ), 0) AS outstanding_amount,
+                        COALESCE(l.opening_balance, 0) +
+                        COALESCE((
+                            SELECT SUM(v.total_amount)
+                            FROM vouchers v
+                            WHERE v.party_ledger_id = l.id
+                              AND v.voucher_type IN ('Sales', 'SALES', 'Invoice', 'Sales Invoice')
+                              AND v.is_cancelled = FALSE
+                        ), 0) -
+                        COALESCE((
+                            SELECT SUM(v.total_amount)
+                            FROM vouchers v
+                            WHERE v.party_ledger_id = l.id
+                              AND v.voucher_type IN ('Receipt', 'RECEIPT', 'Payment Received')
+                              AND v.is_cancelled = FALSE
+                        ), 0) AS current_balance,
+                        CASE
+                            WHEN (SELECT COUNT(*)
+                                  FROM vouchers v
+                                  WHERE v.party_ledger_id = l.id
+                                    AND v.voucher_type IN ('Sales', 'SALES', 'Invoice')
+                                    AND v.is_cancelled = FALSE) > 0
+                            THEN (SELECT SUM(v.total_amount)
+                                  FROM vouchers v
+                                  WHERE v.party_ledger_id = l.id
+                                    AND v.voucher_type IN ('Sales', 'SALES', 'Invoice')
+                                    AND v.is_cancelled = FALSE) /
+                                 (SELECT COUNT(*)
+                                  FROM vouchers v
+                                  WHERE v.party_ledger_id = l.id
+                                    AND v.voucher_type IN ('Sales', 'SALES', 'Invoice')
+                                    AND v.is_cancelled = FALSE)
+                            ELSE 0
+                        END AS average_order_value,
+                        0 AS sales_rank,
+                        0 AS outstanding_rank,
+                        CASE
+                            WHEN ABS(COALESCE(l.opening_balance, 0) +
+                                     COALESCE((SELECT SUM(v.total_amount) FROM vouchers v WHERE v.party_ledger_id = l.id AND v.voucher_type IN ('Sales', 'SALES', 'Invoice') AND v.is_cancelled = FALSE), 0) -
+                                     COALESCE((SELECT SUM(v.total_amount) FROM vouchers v WHERE v.party_ledger_id = l.id AND v.voucher_type IN ('Receipt', 'RECEIPT') AND v.is_cancelled = FALSE), 0)
+                            ) >= 10000000 THEN '₹' || ROUND((COALESCE(l.opening_balance, 0) +
+                                     COALESCE((SELECT SUM(v.total_amount) FROM vouchers v WHERE v.party_ledger_id = l.id AND v.voucher_type IN ('Sales', 'SALES', 'Invoice') AND v.is_cancelled = FALSE), 0) -
+                                     COALESCE((SELECT SUM(v.total_amount) FROM vouchers v WHERE v.party_ledger_id = l.id AND v.voucher_type IN ('Receipt', 'RECEIPT') AND v.is_cancelled = FALSE), 0)
+                            ) / 10000000.0, 2) || ' Cr'
+                            WHEN ABS(COALESCE(l.opening_balance, 0) +
+                                     COALESCE((SELECT SUM(v.total_amount) FROM vouchers v WHERE v.party_ledger_id = l.id AND v.voucher_type IN ('Sales', 'SALES', 'Invoice') AND v.is_cancelled = FALSE), 0) -
+                                     COALESCE((SELECT SUM(v.total_amount) FROM vouchers v WHERE v.party_ledger_id = l.id AND v.voucher_type IN ('Receipt', 'RECEIPT') AND v.is_cancelled = FALSE), 0)
+                            ) >= 100000 THEN '₹' || ROUND((COALESCE(l.opening_balance, 0) +
+                                     COALESCE((SELECT SUM(v.total_amount) FROM vouchers v WHERE v.party_ledger_id = l.id AND v.voucher_type IN ('Sales', 'SALES', 'Invoice') AND v.is_cancelled = FALSE), 0) -
+                                     COALESCE((SELECT SUM(v.total_amount) FROM vouchers v WHERE v.party_ledger_id = l.id AND v.voucher_type IN ('Receipt', 'RECEIPT') AND v.is_cancelled = FALSE), 0)
+                            ) / 100000.0, 2) || ' L'
+                            ELSE '₹' || ROUND(COALESCE(l.opening_balance, 0) +
+                                     COALESCE((SELECT SUM(v.total_amount) FROM vouchers v WHERE v.party_ledger_id = l.id AND v.voucher_type IN ('Sales', 'SALES', 'Invoice') AND v.is_cancelled = FALSE), 0) -
+                                     COALESCE((SELECT SUM(v.total_amount) FROM vouchers v WHERE v.party_ledger_id = l.id AND v.voucher_type IN ('Receipt', 'RECEIPT') AND v.is_cancelled = FALSE), 0)
+                            , 0)
+                        END AS outstanding_formatted,
+                        '₹0' AS sales_formatted,
+                        CASE
+                            WHEN COALESCE(l.opening_balance, 0) +
+                                 COALESCE((SELECT SUM(v.total_amount) FROM vouchers v WHERE v.party_ledger_id = l.id AND v.voucher_type IN ('Sales', 'SALES', 'Invoice') AND v.is_cancelled = FALSE), 0) -
+                                 COALESCE((SELECT SUM(v.total_amount) FROM vouchers v WHERE v.party_ledger_id = l.id AND v.voucher_type IN ('Receipt', 'RECEIPT') AND v.is_cancelled = FALSE), 0) > 0
+                            THEN 'OWES_MONEY'
+                            WHEN COALESCE(l.opening_balance, 0) +
+                                 COALESCE((SELECT SUM(v.total_amount) FROM vouchers v WHERE v.party_ledger_id = l.id AND v.voucher_type IN ('Sales', 'SALES', 'Invoice') AND v.is_cancelled = FALSE), 0) -
+                                 COALESCE((SELECT SUM(v.total_amount) FROM vouchers v WHERE v.party_ledger_id = l.id AND v.voucher_type IN ('Receipt', 'RECEIPT') AND v.is_cancelled = FALSE), 0) < 0
+                            THEN 'HAS_ADVANCE'
+                            ELSE 'SETTLED'
+                        END AS balance_status
+                    FROM ledgers l
+                    WHERE l.company_guid = $1
+                      AND l.parent_group = 'Sundry Debtors'
+                      AND l.active = TRUE
+                      AND l.name IS NOT NULL
+                      AND l.name != ''
+                      AND LOWER(l.name) NOT IN ('cash', 'bank', 'cash in hand', 'petty cash', 'bank account', 'bank accounts')
+                    """,
+                    company_guid,
+                    period_start,
+                    period_end,
+                )
+
+                await conn.execute(
+                    """
+                    WITH ranked AS (
+                        SELECT
+                            customer_guid,
+                            ROW_NUMBER() OVER (PARTITION BY company_guid ORDER BY sales_value DESC) AS s_rank,
+                            ROW_NUMBER() OVER (PARTITION BY company_guid ORDER BY outstanding_amount DESC) AS o_rank
+                        FROM ai.customer_summary
+                        WHERE company_guid = $1
+                    )
+                    UPDATE ai.customer_summary cs
+                    SET
+                        sales_rank = r.s_rank,
+                        outstanding_rank = r.o_rank
+                    FROM ranked r
+                    WHERE cs.customer_guid = r.customer_guid
+                      AND cs.company_guid = $1
+                    """,
+                    company_guid,
+                )
+
+                await conn.execute(
+                    """
+                    UPDATE ai.customer_summary
+                    SET sales_formatted =
+                        CASE
+                            WHEN sales_value >= 10000000 THEN '₹' || ROUND(sales_value / 10000000.0, 2) || ' Cr'
+                            WHEN sales_value >= 100000 THEN '₹' || ROUND(sales_value / 100000.0, 2) || ' L'
+                            WHEN sales_value >= 1000 THEN '₹' || ROUND(sales_value / 1000.0, 1) || ' K'
+                            ELSE '₹' || ROUND(sales_value, 0)
+                        END
+                    WHERE company_guid = $1
+                    """,
+                    company_guid,
+                )
+
+                logger.info("Customer summary refreshed for %s", company_guid)
+    except Exception as exc:
+        logger.error("Failed to refresh customer summary: %s", str(exc))
+        raise
+    finally:
+        await pool.close()
+
+
+# -----------------------------------------------------------------------------
+# REFRESH BUSINESS OVERVIEW
+# -----------------------------------------------------------------------------
+
+async def refresh_business_overview(company_guid: str):
+    """Update ai.business_overview with correct totals from customer_summary."""
+    pool = await get_db_pool()
+    try:
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                await conn.execute(
+                    """
+                    UPDATE ai.business_overview bo
+                    SET
+                        total_receivables = COALESCE((
+                            SELECT SUM(outstanding_amount)
+                            FROM ai.customer_summary cs
+                            WHERE cs.company_guid = bo.company_guid
+                              AND cs.outstanding_amount > 0
+                        ), 0),
+                        total_advances = COALESCE((
+                            SELECT ABS(SUM(outstanding_amount))
+                            FROM ai.customer_summary cs
+                            WHERE cs.company_guid = bo.company_guid
+                              AND cs.outstanding_amount < 0
+                        ), 0),
+                        total_customers = COALESCE((
+                            SELECT COUNT(DISTINCT customer_name)
+                            FROM ai.customer_summary cs
+                            WHERE cs.company_guid = bo.company_guid
+                        ), 0),
+                        total_sales = COALESCE((
+                            SELECT SUM(sales_value)
+                            FROM ai.customer_summary cs
+                            WHERE cs.company_guid = bo.company_guid
+                        ), 0),
+                        total_receipts = COALESCE((
+                            SELECT SUM(receipts_value)
+                            FROM ai.customer_summary cs
+                            WHERE cs.company_guid = bo.company_guid
+                        ), 0),
+                        total_sales_formatted = (
+                            SELECT
+                                CASE
+                                    WHEN SUM(sales_value) >= 10000000 THEN '₹' || ROUND(SUM(sales_value) / 10000000.0, 2) || ' Cr'
+                                    WHEN SUM(sales_value) >= 100000 THEN '₹' || ROUND(SUM(sales_value) / 100000.0, 2) || ' L'
+                                    ELSE '₹' || ROUND(SUM(sales_value), 0)
+                                END
+                            FROM ai.customer_summary cs
+                            WHERE cs.company_guid = bo.company_guid
+                        ),
+                        total_receivables_formatted = (
+                            SELECT
+                                CASE
+                                    WHEN SUM(CASE WHEN outstanding_amount > 0 THEN outstanding_amount ELSE 0 END) >= 10000000
+                                        THEN '₹' || ROUND(SUM(CASE WHEN outstanding_amount > 0 THEN outstanding_amount ELSE 0 END) / 10000000.0, 2) || ' Cr'
+                                    WHEN SUM(CASE WHEN outstanding_amount > 0 THEN outstanding_amount ELSE 0 END) >= 100000
+                                        THEN '₹' || ROUND(SUM(CASE WHEN outstanding_amount > 0 THEN outstanding_amount ELSE 0 END) / 100000.0, 2) || ' L'
+                                    ELSE '₹' || ROUND(COALESCE(SUM(CASE WHEN outstanding_amount > 0 THEN outstanding_amount ELSE 0 END), 0), 0)
+                                END
+                            FROM ai.customer_summary cs
+                            WHERE cs.company_guid = bo.company_guid
+                        ),
+                        total_advances_formatted = (
+                            SELECT
+                                CASE
+                                    WHEN ABS(SUM(CASE WHEN outstanding_amount < 0 THEN outstanding_amount ELSE 0 END)) >= 10000000
+                                        THEN '₹' || ROUND(ABS(SUM(CASE WHEN outstanding_amount < 0 THEN outstanding_amount ELSE 0 END)) / 10000000.0, 2) || ' Cr'
+                                    WHEN ABS(SUM(CASE WHEN outstanding_amount < 0 THEN outstanding_amount ELSE 0 END)) >= 100000
+                                        THEN '₹' || ROUND(ABS(SUM(CASE WHEN outstanding_amount < 0 THEN outstanding_amount ELSE 0 END)) / 100000.0, 2) || ' L'
+                                    ELSE '₹' || ROUND(COALESCE(ABS(SUM(CASE WHEN outstanding_amount < 0 THEN outstanding_amount ELSE 0 END)), 0), 0)
+                                END
+                            FROM ai.customer_summary cs
+                            WHERE cs.company_guid = bo.company_guid
+                        )
+                    WHERE bo.company_guid = $1
+                    """,
+                    company_guid,
+                )
+
+                logger.info("Business overview updated for %s", company_guid)
+    except Exception as exc:
+        logger.error("Failed to update business overview: %s", str(exc))
+        raise
+    finally:
+        await pool.close()
+
+
+# -----------------------------------------------------------------------------
+# REFRESH DASHBOARD METRICS
+# -----------------------------------------------------------------------------
+
+async def refresh_dashboard_metrics(company_guid: str):
+    """Update dashboard_metrics with correct values."""
+    pool = await get_db_pool()
+    try:
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                await conn.execute(
+                    """
+                    UPDATE public.dashboard_metrics dm
+                    SET
+                        total_receivable = COALESCE((
+                            SELECT SUM(total_receivables)
+                            FROM ai.business_overview bo
+                            WHERE bo.company_guid = dm.company_guid
+                        ), 0),
+                        customer_count = COALESCE((
+                            SELECT SUM(total_customers)
+                            FROM ai.business_overview bo
+                            WHERE bo.company_guid = dm.company_guid
+                        ), 0),
+                        calculated_at = NOW()
+                    WHERE dm.company_guid = $1
+                    """,
+                    company_guid,
+                )
+
+                await conn.execute(
+                    """
+                    UPDATE public.dashboard_metrics
+                    SET total_receivable = 0
+                    WHERE company_guid = $1
+                      AND (total_receivable::text = 'NaN' OR total_receivable IS NULL)
+                    """,
+                    company_guid,
+                )
+
+                logger.info("Dashboard metrics updated for %s", company_guid)
+    except Exception as exc:
+        logger.error("Failed to update dashboard metrics: %s", str(exc))
+        raise
+    finally:
+        await pool.close()
+
+
+# -----------------------------------------------------------------------------
+# MAIN REFRESH FUNCTION
+# -----------------------------------------------------------------------------
+
+async def refresh_company_ai_data(company_guid: str):
+    """
+    Complete refresh of all AI data for a company.
+
+    Order:
+    1. Customer summary (from vouchers)
+    2. Business overview (from customer summary)
+    3. Dashboard metrics (from business overview)
+    """
+    logger.info("Starting AI refresh for %s", company_guid)
+
+    try:
+        await refresh_customer_summary(company_guid)
+        await refresh_business_overview(company_guid)
+        await refresh_dashboard_metrics(company_guid)
+        logger.info("AI refresh complete for %s", company_guid)
+    except Exception as exc:
+        logger.error("AI refresh failed for %s: %s", company_guid, str(exc))
+        raise
 
 
 async def refresh_all_companies():
-  logger.info("⏰ Starting aging refresh for all companies...")
-  pool = await get_db_pool()
-  try:
-    async with pool.acquire() as conn:
-      companies = await conn.fetch(
-        """
-        SELECT company_guid 
-        FROM companies 
-        WHERE active = TRUE
-        """
-      )
+    """Refresh AI data for all active companies."""
+    logger.info("Starting AI refresh for all companies")
 
-      logger.info(f"Found {len(companies)} active companies")
+    pool = await get_db_pool()
+    try:
+        async with pool.acquire() as conn:
+            companies = await conn.fetch(
+                """
+                SELECT company_guid
+                FROM companies
+                WHERE active = TRUE
+                """
+            )
 
-      for company in companies:
-        try:
-          await refresh_company_aging(company["company_guid"])
-        except Exception as e:
-          logger.error(f"Failed to refresh {company['company_guid']}: {str(e)}")
+            logger.info("Found %s active companies", len(companies))
 
-      logger.info("✅ Aging refresh completed for all companies")
-  finally:
-    await pool.close()
+            for company in companies:
+                try:
+                    await refresh_company_ai_data(company["company_guid"])
+                except Exception as exc:
+                    logger.error(
+                        "Failed to refresh %s: %s",
+                        company["company_guid"],
+                        str(exc),
+                    )
 
+            logger.info("AI refresh completed for all companies")
+    finally:
+        await pool.close()
+
+
+# -----------------------------------------------------------------------------
+# SCHEDULER
+# -----------------------------------------------------------------------------
 
 scheduler = AsyncIOScheduler()
 
 
 def start_scheduler():
-  scheduler.add_job(
-    refresh_all_companies,
-    "interval",
-    minutes=5,
-    id="refresh_aging",
-    replace_existing=True,
-  )
+    scheduler.add_job(
+        refresh_all_companies,
+        "interval",
+        minutes=5,
+        id="refresh_ai_data",
+        replace_existing=True,
+    )
 
-  scheduler.add_job(
-    refresh_all_companies,
-    "date",
-    run_date=datetime.now(),
-    id="refresh_aging_startup",
-  )
+    scheduler.add_job(
+        refresh_all_companies,
+        "date",
+        run_date=datetime.now(),
+        id="refresh_ai_data_startup",
+    )
 
-  scheduler.start()
-  logger.info("✅ Aging refresh scheduler started (runs every 5 minutes)")
+    scheduler.start()
+    logger.info("AI refresh scheduler started (runs every 5 minutes)")
 
 
 def stop_scheduler():
-  scheduler.shutdown()
-  logger.info("Scheduler stopped")
+    scheduler.shutdown()
+    logger.info("Scheduler stopped")
