@@ -79,11 +79,25 @@ async function getLedgerId(ledgerName, companyGuid) {
   }
   
   try {
-    const result = await pool.query(
+    // First try exact name match
+    let result = await pool.query(
       'SELECT id FROM ledgers WHERE name = $1 AND company_guid = $2 LIMIT 1',
       [ledgerName, companyGuid]
     );
     
+    // If not found, try case-insensitive match
+    if (result.rows.length === 0) {
+      result = await pool.query(
+        'SELECT id FROM ledgers WHERE LOWER(name) = LOWER($1) AND company_guid = $2 LIMIT 1',
+        [ledgerName, companyGuid]
+      );
+    }
+    
+    // If still not found, log for visibility
+    if (result.rows.length === 0) {
+      console.warn(`Ledger not found for party: "${ledgerName}" - party_ledger_id will be NULL`);
+    }
+
     const ledgerId = result.rows.length > 0 ? result.rows[0].id : null;
     ledgerCache.set(cacheKey, ledgerId);
     return ledgerId;

@@ -2341,8 +2341,43 @@ app.post('/api/sync/ledgers', async (req, res) => {
 
     for (const ledger of ledgerArray) {
       try {
+        if (process.env.DEBUG_LEDGER_SYNC === 'true') {
+          console.log('Raw ledger data:', JSON.stringify(ledger).slice(0, 500));
+        }
+
         const guid = extractValue(ledger?.GUID) || ledger?.GUID || '';
-        const name = extractValue(ledger?.NAME) || ledger?.NAME || '';
+        let name = '';
+        const extractedName = extractValue(ledger?.NAME);
+        if (typeof extractedName === 'string') {
+          name = extractedName;
+        } else if (ledger?.NAME) {
+          if (typeof ledger.NAME === 'string') {
+            name = ledger.NAME;
+          } else if (ledger.NAME && typeof ledger.NAME === 'object') {
+            if (typeof ledger.NAME._ === 'string') {
+              name = ledger.NAME._;
+            } else if (typeof ledger.NAME.$ === 'string') {
+              name = ledger.NAME.$;
+            } else if (ledger.NAME.$ && typeof ledger.NAME.$ === 'object') {
+              const attrString = Object.values(ledger.NAME.$).find((value) => typeof value === 'string');
+              if (attrString) {
+                name = attrString;
+              }
+            }
+
+            if (!name) {
+              const fallbackString = Object.values(ledger.NAME).find((value) => typeof value === 'string');
+              if (fallbackString) {
+                name = fallbackString;
+              }
+            }
+          }
+        }
+        name = typeof name === 'string' ? name.trim() : '';
+        if (!name && ledger?.GUID) {
+          console.warn(`Empty name for ledger GUID: ${extractValue(ledger.GUID) || ledger.GUID}`);
+          console.log('Raw NAME field:', JSON.stringify(ledger?.NAME));
+        }
         const parent = extractValue(ledger?.PARENT) || ledger?.PARENT || '';
         const openingBalance = parseFloat(extractValue(ledger?.OPENINGBALANCE) || ledger?.OPENINGBALANCE || 0);
         const closingBalance = parseFloat(extractValue(ledger?.CLOSINGBALANCE) || ledger?.CLOSINGBALANCE || 0);
