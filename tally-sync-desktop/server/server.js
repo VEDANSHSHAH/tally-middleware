@@ -296,6 +296,52 @@ const extractValue = (value) => {
   return value;
 };
 
+// Robust name extraction for Tally XML (handles all formats)
+const extractLedgerName = (ledger) => {
+  if (!ledger) return '';
+  
+  // Method 1: Check $ attribute (XML attributes like NAME="AKASH")
+  if (ledger.$ && ledger.$.NAME) {
+    const name = ledger.$.NAME;
+    if (typeof name === 'string') return name.trim();
+    if (typeof name === 'object' && name._) return String(name._).trim();
+  }
+  
+  // Method 2: Check direct NAME property
+  if (ledger.NAME !== undefined && ledger.NAME !== null) {
+    const name = ledger.NAME;
+    
+    // Direct string
+    if (typeof name === 'string') {
+      return name.trim();
+    }
+    
+    // Object with _ property (xml2js format)
+    if (typeof name === 'object') {
+      if (name._ !== undefined) return String(name._).trim();
+      if (name.$ !== undefined) return String(name.$).trim();
+      if (name['#text'] !== undefined) return String(name['#text']).trim();
+      
+      // Last resort: find any string value in the object
+      const values = Object.values(name);
+      for (const val of values) {
+        if (typeof val === 'string' && val.trim()) {
+          return val.trim();
+        }
+      }
+    }
+  }
+  
+  // Method 3: extractValue fallback
+  const extracted = extractValue(ledger.NAME);
+  if (extracted && typeof extracted === 'string') {
+    return extracted.trim();
+  }
+  
+  return '';
+};
+
+
 // Friendly root handler so hitting "/" shows a message instead of "Cannot GET /"
 app.get('/', (req, res) => {
   res.json({
@@ -1327,7 +1373,14 @@ app.post('/api/sync/vendors', async (req, res) => {
     for (const vendor of vendors) {
       try {
         const guid = vendor.GUID?._ || vendor.GUID;
-        const name = vendor.$?.NAME || vendor.NAME;
+        const name = extractLedgerName(vendor);
+        
+        // Skip vendors with empty names
+        if (!name || name.trim() === '') {
+          console.warn(`⚠️ Skipping vendor with empty name (GUID: ${guid})`);
+          continue;
+        }
+        
         const openingBalance = parseFloat(vendor.OPENINGBALANCE?._ || vendor.OPENINGBALANCE || 0);
         const currentBalance = parseFloat(vendor.CLOSINGBALANCE?._ || vendor.CLOSINGBALANCE || 0);
 
@@ -1734,7 +1787,14 @@ app.post('/api/sync/customers', async (req, res) => {
     for (const customer of customers) {
       try {
         const guid = customer.GUID?._ || customer.GUID;
-        const name = customer.$?.NAME || customer.NAME;
+        const name = extractLedgerName(customer);
+        
+        // Skip customers with empty names
+        if (!name || name.trim() === '') {
+          console.warn(`⚠️ Skipping customer with empty name (GUID: ${guid})`);
+          continue;
+        }
+        
         const openingBalance = parseFloat(customer.OPENINGBALANCE?._ || customer.OPENINGBALANCE || 0);
         const currentBalance = parseFloat(customer.CLOSINGBALANCE?._ || customer.CLOSINGBALANCE || 0);
 
@@ -2341,43 +2401,21 @@ app.post('/api/sync/ledgers', async (req, res) => {
 
     for (const ledger of ledgerArray) {
       try {
-        if (process.env.DEBUG_LEDGER_SYNC === 'true') {
-          console.log('Raw ledger data:', JSON.stringify(ledger).slice(0, 500));
-        }
+        // DEBUG: Uncomment to see raw Tally XML structure
+        // console.log('Raw ledger data:', JSON.stringify(ledger).slice(0, 500));
 
         const guid = extractValue(ledger?.GUID) || ledger?.GUID || '';
-        let name = '';
-        const extractedName = extractValue(ledger?.NAME);
-        if (typeof extractedName === 'string') {
-          name = extractedName;
-        } else if (ledger?.NAME) {
-          if (typeof ledger.NAME === 'string') {
-            name = ledger.NAME;
-          } else if (ledger.NAME && typeof ledger.NAME === 'object') {
-            if (typeof ledger.NAME._ === 'string') {
-              name = ledger.NAME._;
-            } else if (typeof ledger.NAME.$ === 'string') {
-              name = ledger.NAME.$;
-            } else if (ledger.NAME.$ && typeof ledger.NAME.$ === 'object') {
-              const attrString = Object.values(ledger.NAME.$).find((value) => typeof value === 'string');
-              if (attrString) {
-                name = attrString;
-              }
-            }
-
-            if (!name) {
-              const fallbackString = Object.values(ledger.NAME).find((value) => typeof value === 'string');
-              if (fallbackString) {
-                name = fallbackString;
-              }
-            }
-          }
+        
+        // Use robust name extraction function
+        const name = extractLedgerName(ledger);
+        
+        // Skip ledgers with empty names
+        if (!name) {
+          console.warn(`⚠️ Skipping ledger with empty name (GUID: ${guid})`);
+          console.log('   Raw NAME field:', JSON.stringify(ledger?.NAME));
+          continue;
         }
-        name = typeof name === 'string' ? name.trim() : '';
-        if (!name && ledger?.GUID) {
-          console.warn(`Empty name for ledger GUID: ${extractValue(ledger.GUID) || ledger.GUID}`);
-          console.log('Raw NAME field:', JSON.stringify(ledger?.NAME));
-        }
+        
         const parent = extractValue(ledger?.PARENT) || ledger?.PARENT || '';
         const openingBalance = parseFloat(extractValue(ledger?.OPENINGBALANCE) || ledger?.OPENINGBALANCE || 0);
         const closingBalance = parseFloat(extractValue(ledger?.CLOSINGBALANCE) || ledger?.CLOSINGBALANCE || 0);
