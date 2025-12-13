@@ -360,12 +360,18 @@ function formatCurrency(amount) {
   });
 }
 
-// Initialize database on startup (don't exit on error, just log it)
-initDB().catch(err => {
-  console.error('⚠️ Failed to initialize database:', err.message);
-  console.error('⚠️ Server will continue but database operations may fail');
-  // Don't exit - let server start anyway so we can see the error
-});
+// Initialize database on startup (read-only readiness check)
+let dbInitStatus = null;
+const dbReadyPromise = initDB()
+  .then(status => {
+    dbInitStatus = status;
+    return status;
+  })
+  .catch(err => {
+    console.error('⚠️ Failed to initialize database:', err.message);
+    console.error('⚠️ Server will continue but database operations may fail');
+    return null;
+  });
 
 // Run company migration on startup
 async function runCompanyMigration() {
@@ -475,19 +481,34 @@ async function runAllMigrations() {
     console.warn('⚠️ Database not configured, skipping migrations');
     return;
   }
+  const status = dbInitStatus || (await dbReadyPromise.catch(() => null));
+  const autoMigrateEnabled = process.env.DB_AUTO_MIGRATE === 'true';
+
+  if (status?.ready && !autoMigrateEnabled) {
+    console.log('✅ Core schema detected; skipping bundled SQL migrations (DB_AUTO_MIGRATE=true to force).');
+    return;
+  }
+
+  if (!autoMigrateEnabled) {
+    const missingTables = status?.missing?.length ? ` Missing: ${status.missing.join(', ')}` : '';
+    console.warn(`⚠️ DB_AUTO_MIGRATE not enabled; bundled SQL migrations skipped.${missingTables}`);
+    console.warn('⚠️ Apply your managed schema or set DB_AUTO_MIGRATE=true to run local SQL helpers.');
+    return;
+  }
+
+  if (status?.ready) {
+    console.log('⚙️ DB_AUTO_MIGRATE=true - running bundled SQL helpers even though schema looks ready.');
+  }
+
   await runCompanyMigration();
   await runIncrementalSyncMigration();
-
-  // Install materialized views (auto-install on startup!)
   await installMaterializedViews();
-
-  // Backfill missing company_guid for legacy rows (helps incremental + filters)
   await backfillCompanyGuidIfMissing();
 }
 
 // Auto-run migrations (safe to rerun; uses IF NOT EXISTS/ON CONFLICT guards)
-runAllMigrations().catch(err => {
-  console.error('⚠️ Startup migrations failed (continuing):', err.message);
+dbReadyPromise.then(runAllMigrations).catch(err => {
+  console.error('⚠️ Startup migrations failed (continuing):', err?.message || err);
 });
 // Backfill missing company_guid values for single-company setups (helps filters + incremental sync)
 async function backfillCompanyGuidIfMissing() {
