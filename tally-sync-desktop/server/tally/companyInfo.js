@@ -1,21 +1,6 @@
 const axios = require('axios');
 const xml2js = require('xml2js');
-
-const extractValue = (value) => {
-  if (value === undefined || value === null) return null;
-  if (typeof value === 'object' && '_' in value) return value._;
-  return value;
-};
-
-const escapeXml = (value) => {
-  if (value === undefined || value === null) return '';
-  return String(value)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&apos;');
-};
+const { extractValue, escapeXml } = require('../utils/tallyHelpers');
 
 async function getCompanyInfo(preferredCompanyName = null) {
   const tallyUrl = process.env.TALLY_URL || 'http://localhost:9000';

@@ -13,20 +13,11 @@
 
 // Database connection - using same pool as main server
 const { pool } = require('../db/postgres');
+const { extractValue } = require('../utils/tallyHelpers');
 
 // =====================================================
 // HELPER FUNCTIONS
 // =====================================================
-
-/**
- * Extract value from Tally XML node (handles both direct values and {_: value} format)
- */
-function extractValue(value) {
-  if (value === undefined || value === null) return null;
-  if (typeof value === 'object' && '_' in value) return value._;
-  if (typeof value === 'object' && '$' in value) return value.$;
-  return value;
-}
 
 /**
  * Parse Tally amount (removes negatives, handles text)
@@ -272,7 +263,9 @@ async function parseVoucher(voucher, companyGuid) {
     company_guid: companyGuid,
     voucher_number: extractValue(voucher.VOUCHERNUMBER) || 'N/A',
     voucher_type: extractValue(voucher.VOUCHERTYPENAME),
-    voucher_name: extractValue(voucher.VOUCHERTYPEORIGNAME),
+    voucher_name: extractValue(voucher.REFERENCE) || 
+              (extractValue(voucher.NARRATION) ? extractValue(voucher.NARRATION).substring(0, 200) : null) || 
+              `${extractValue(voucher.VOUCHERTYPENAME)}-${extractValue(voucher.VOUCHERNUMBER)}`,
     date: parseTallyDate(voucher.DATE),
     
     // References

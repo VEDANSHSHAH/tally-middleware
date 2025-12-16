@@ -14,8 +14,6 @@
 const express = require('express');
 const axios = require('axios');
 const xml2js = require('xml2js');
-const fs = require('fs');
-const path = require('path');
 const router = express.Router();
 
 const { buildVoucherFetchXML, syncVouchers, clearCaches } = require('./voucherSync');
@@ -23,33 +21,14 @@ const { pool } = require('../db/postgres');
 const { getCompanyInfo } = require('../tally/companyInfo');
 const cache = require('../cache');
 const { updateProgress, getProgress, resetProgress } = require('../syncProgress');
+const { loadConfig } = require('../utils/config');
+const { formatTallyDate } = require('../utils/tallyHelpers');
 
 // =====================================================
-// CONFIG & HELPER FUNCTIONS (duplicated from server.js for independence)
+// CONFIG & HELPER FUNCTIONS
 // =====================================================
 
-const TALLY_URL = 'http://localhost:9000';
-const CONFIG_FILE = path.join(__dirname, '../../config.json');
-
-function loadConfig() {
-  try {
-    if (fs.existsSync(CONFIG_FILE)) {
-      return JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf-8'));
-    }
-  } catch (error) {
-    console.error('Error loading config:', error);
-  }
-  return null;
-}
-
-function formatTallyDate(date) {
-  if (!date) return null;
-  const d = new Date(date);
-  const year = d.getFullYear();
-  const month = String(d.getMonth() + 1).padStart(2, '0');
-  const day = String(d.getDate()).padStart(2, '0');
-  return `${year}${month}${day}`; // YYYYMMDD for Tally
-}
+const TALLY_URL = process.env.TALLY_URL || 'http://localhost:9000';
 
 async function queryTally(xmlRequest, options = {}) {
   const { timeout = 60000, retries = 2, queryType = 'unknown' } = options;
